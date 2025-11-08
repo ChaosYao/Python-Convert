@@ -56,7 +56,7 @@ def get_mode(config_path: Optional[str] = None) -> Optional[str]:
     return None
 
 
-async def run_server(config_path: Optional[str] = None):
+def run_server(config_path: Optional[str] = None):
     """Run NDN server that responds to Interests."""
     config = get_config(config_path)
     
@@ -105,13 +105,14 @@ async def run_server(config_path: Optional[str] = None):
     logger.info("=" * 50)
     
     try:
-        await server.run()
+        # NDNApp.run_forever() handles event loop internally, so we call it directly
+        server.app.run_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.shutdown()
 
 
-async def run_client(config_path: Optional[str] = None):
+def run_client(config_path: Optional[str] = None):
     """Run NDN client that sends Interests."""
     config = get_config(config_path)
     
@@ -166,7 +167,8 @@ async def run_client(config_path: Optional[str] = None):
         client.shutdown()
     
     try:
-        await client.run(after_start=client_main())
+        # NDNApp.run_forever() handles event loop internally, so we call it directly
+        client.app.run_forever(after_start=client_main())
     except KeyboardInterrupt:
         logger.info("Shutting down client...")
         client.shutdown()
@@ -199,14 +201,16 @@ def main():
     
     if mode == 'server':
         try:
-            asyncio.run(run_server(config_path))
+            # run_server() calls app.run_forever() which handles event loop internally
+            run_server(config_path)
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
     elif mode == 'client':
         try:
-            asyncio.run(run_client(config_path))
+            # run_client() calls app.run_forever() which handles event loop internally
+            run_client(config_path)
         except KeyboardInterrupt:
             logger.info("Client stopped by user")
         except Exception as e:
