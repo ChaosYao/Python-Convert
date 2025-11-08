@@ -40,13 +40,41 @@ class NDNServer:
             
             # Create Keychain with custom paths if provided
             if pib_path or tpm_path:
+                # Expand ~ and relative paths
+                if pib_path:
+                    pib_path = os.path.expanduser(pib_path)
+                    pib_path = os.path.abspath(pib_path)
+                    # Create directory if it doesn't exist
+                    pib_dir = os.path.dirname(pib_path)
+                    if pib_dir and not os.path.exists(pib_dir):
+                        os.makedirs(pib_dir, mode=0o700, exist_ok=True)
+                        logger.info(f"Created PIB directory: {pib_dir}")
+                
+                if tpm_path:
+                    tpm_path = os.path.expanduser(tpm_path)
+                    tpm_path = os.path.abspath(tpm_path)
+                    # Create directory if it doesn't exist
+                    if not os.path.exists(tpm_path):
+                        os.makedirs(tpm_path, mode=0o700, exist_ok=True)
+                        logger.info(f"Created TPM directory: {tpm_path}")
+                
                 tpm = TpmFile(tpm_path) if tpm_path else TpmFile()
                 pib_path = pib_path or os.path.join(os.path.expanduser('~'), '.ndn', 'pib.db')
-                keychain = KeychainSqlite3(pib_path, tpm)
-                self.app = NDNApp(keychain=keychain)
-                logger.info(f"Using custom PIB path: {pib_path}")
-                if tpm_path:
-                    logger.info(f"Using custom TPM path: {tpm_path}")
+                
+                try:
+                    keychain = KeychainSqlite3(pib_path, tpm)
+                    self.app = NDNApp(keychain=keychain)
+                    logger.info(f"Using custom PIB path: {pib_path}")
+                    if tpm_path:
+                        logger.info(f"Using custom TPM path: {tpm_path}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Keychain with PIB: {pib_path}, TPM: {tpm_path}")
+                    logger.error(f"Error: {e}")
+                    logger.error("Please check:")
+                    logger.error(f"  1. Directory exists and is writable: {os.path.dirname(pib_path) if pib_path else 'N/A'}")
+                    logger.error(f"  2. TPM directory exists and is writable: {tpm_path if tpm_path else 'N/A'}")
+                    logger.error("  3. Or remove pib_path/tpm_path from config to use defaults")
+                    raise
             else:
                 self.app = NDNApp()
                 logger.debug("Using default PIB and TPM paths")

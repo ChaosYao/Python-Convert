@@ -111,11 +111,21 @@ class Config:
     
     def get_ndn_pib_path(self) -> Optional[str]:
         """Get NDN PIB path from config or environment."""
-        return self.get('ndn.pib_path') or self.get('NDN_PIB_PATH')
+        path = self.get('ndn.pib_path') or self.get('NDN_PIB_PATH')
+        if path:
+            # Expand ~ and relative paths
+            path = os.path.expanduser(path)
+            path = os.path.abspath(path)
+        return path
     
     def get_ndn_tpm_path(self) -> Optional[str]:
         """Get NDN TPM path from config or environment."""
-        return self.get('ndn.tpm_path') or self.get('NDN_TPM_PATH')
+        path = self.get('ndn.tpm_path') or self.get('NDN_TPM_PATH')
+        if path:
+            # Expand ~ and relative paths
+            path = os.path.expanduser(path)
+            path = os.path.abspath(path)
+        return path
     
     def get_log_level(self) -> str:
         """Get log level from config or environment."""
