@@ -24,6 +24,7 @@ sys.path.insert(0, str(project_root / 'src'))
 from python_project.ndn.client import NDNClient
 from python_project.ndn.server import NDNServer
 from python_project.utils import setup_logging
+from python_project.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +32,45 @@ logger = logging.getLogger(__name__)
 async def run_server():
     """Run NDN server that responds to Interests."""
     import os
-    # Get PIB and TPM paths from environment variables
-    pib_path = os.getenv('NDN_PIB_PATH')
-    tpm_path = os.getenv('NDN_TPM_PATH')
+    # Try to load config file
+    config = get_config()
+    
+    # Get PIB and TPM paths from config or environment
+    pib_path = config.get_ndn_pib_path() or os.getenv('NDN_PIB_PATH')
+    tpm_path = config.get_ndn_tpm_path() or os.getenv('NDN_TPM_PATH')
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
-    # Register route for '/example' prefix
-    server.register_route('/example')
+    # Get server configuration
+    server_config = config.get_server_config()
+    routes = server_config.get('routes', [])
+    data = server_config.get('data', {})
     
-    # Store some sample data
-    server.store_data('/example/data', b'Hello from NDN Server!')
-    server.store_data('/example/test', b'This is a test message')
+    # Warn if no routes configured
+    if not routes:
+        logger.warning("No routes configured in config file! Server will not respond to any Interests.")
+        logger.warning("Please configure 'server.routes' in config.yaml")
+    else:
+        # Register routes
+        for route in routes:
+            server.register_route(route)
+    
+    # Warn if no data configured
+    if not data:
+        logger.warning("No data configured in config file!")
+        logger.warning("Please configure 'server.data' in config.yaml")
+    else:
+        # Store data
+        for name, content in data.items():
+            if isinstance(content, str):
+                content = content.encode()
+            server.store_data(name, content)
     
     logger.info("=" * 50)
     logger.info("NDN Server started")
-    logger.info("Listening for Interests on prefix: /example")
+    if routes:
+        logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
+    else:
+        logger.info("No routes registered - server will not respond to Interests")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -59,10 +84,24 @@ async def run_server():
 async def run_client():
     """Run NDN client that sends Interests."""
     import os
-    # Get PIB and TPM paths from environment variables
-    pib_path = os.getenv('NDN_PIB_PATH')
-    tpm_path = os.getenv('NDN_TPM_PATH')
+    # Try to load config file
+    config = get_config()
+    
+    # Get PIB and TPM paths from config or environment
+    pib_path = config.get_ndn_pib_path() or os.getenv('NDN_PIB_PATH')
+    tpm_path = config.get_ndn_tpm_path() or os.getenv('NDN_TPM_PATH')
     client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+    
+    # Get client configuration
+    client_config = config.get_client_config()
+    interests = client_config.get('interests', [])
+    interest_lifetime = client_config.get('interest_lifetime', 4000)
+    
+    # Warn if no interests configured
+    if not interests:
+        logger.warning("No interests configured in config file! Client will not send any Interests.")
+        logger.warning("Please configure 'client.interests' in config.yaml")
+        logger.info("Example: client.interests: ['/yao/test/demo/B']")
     
     async def client_main():
         """Main client logic."""
@@ -71,27 +110,24 @@ async def run_client():
         
         logger.info("=" * 50)
         logger.info("NDN Client started")
-        logger.info("Sending Interest packets...")
+        
+        if not interests:
+            logger.warning("No interests to send. Exiting.")
+            client.shutdown()
+            return
+        
+        logger.info(f"Sending {len(interests)} Interest packets: {interests}")
         logger.info("=" * 50)
         
-        # Send Interest for '/example/data'
-        content1 = await client.express_interest('/example/data')
-        if content1:
-            logger.info(f"Received content: {content1.decode()}")
-        
-        await asyncio.sleep(1)
-        
-        # Send Interest for '/example/test'
-        content2 = await client.express_interest('/example/test')
-        if content2:
-            logger.info(f"Received content: {content2.decode()}")
-        
-        await asyncio.sleep(1)
-        
-        # Send Interest for non-existent data
-        content3 = await client.express_interest('/example/notfound')
-        if content3:
-            logger.info(f"Received content: {content3.decode()}")
+        # Send Interests from configuration
+        for interest_name in interests:
+            content = await client.express_interest(
+                interest_name,
+                lifetime=interest_lifetime
+            )
+            if content:
+                logger.info(f"Received content: {content.decode()}")
+            await asyncio.sleep(1)
         
         logger.info("Demo completed")
         client.shutdown()

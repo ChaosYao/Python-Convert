@@ -164,6 +164,13 @@ cython_debug/
 # VS Code
 .vscode/
 
+# NDN Project specific
+config.yaml
+*.pid
+logs/
+server.pid
+client.pid
+
 # macOS
 .DS_Store
 

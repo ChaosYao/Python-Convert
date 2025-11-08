@@ -67,25 +67,40 @@ async def run_server(config_path: Optional[str] = None):
     
     # Get server configuration
     server_config = config.get_server_config()
-    routes = server_config.get('routes', ['/example'])
-    data = server_config.get('data', {
-        '/example/data': 'Hello from NDN Server!',
-        '/example/test': 'This is a test message'
-    })
+    routes = server_config.get('routes', [])
+    data = server_config.get('data', {})
     
-    # Register routes
-    for route in routes:
-        server.register_route(route)
+    # Log configuration for debugging
+    logger.debug(f"Server config loaded: {server_config}")
+    logger.info(f"Routes to register: {routes}")
+    logger.info(f"Data to store: {list(data.keys())}")
     
-    # Store data
-    for name, content in data.items():
-        if isinstance(content, str):
-            content = content.encode()
-        server.store_data(name, content)
+    # Warn if no routes configured
+    if not routes:
+        logger.warning("No routes configured in config file! Server will not respond to any Interests.")
+        logger.warning("Please configure 'server.routes' in config.yaml")
+    else:
+        # Register routes
+        for route in routes:
+            server.register_route(route)
+    
+    # Warn if no data configured
+    if not data:
+        logger.warning("No data configured in config file!")
+        logger.warning("Please configure 'server.data' in config.yaml")
+    else:
+        # Store data
+        for name, content in data.items():
+            if isinstance(content, str):
+                content = content.encode()
+            server.store_data(name, content)
     
     logger.info("=" * 50)
     logger.info("NDN Server started")
-    logger.info("Listening for Interests on prefix: /example")
+    if routes:
+        logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
+    else:
+        logger.info("No routes registered - server will not respond to Interests")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -107,12 +122,19 @@ async def run_client(config_path: Optional[str] = None):
     
     # Get client configuration
     client_config = config.get_client_config()
-    interests = client_config.get('interests', [
-        '/example/data',
-        '/example/test',
-        '/example/notfound'
-    ])
+    interests = client_config.get('interests', [])
     interest_lifetime = client_config.get('interest_lifetime', 4000)
+    
+    # Log configuration for debugging
+    logger.debug(f"Client config loaded: {client_config}")
+    
+    # Warn if no interests configured
+    if not interests:
+        logger.warning("No interests configured in config file! Client will not send any Interests.")
+        logger.warning("Please configure 'client.interests' in config.yaml")
+        logger.info("Example: client.interests: ['/yao/test/demo/B']")
+    else:
+        logger.info(f"Will send {len(interests)} interests: {interests}")
     
     async def client_main():
         """Main client logic."""
@@ -121,6 +143,12 @@ async def run_client(config_path: Optional[str] = None):
         
         logger.info("=" * 50)
         logger.info("NDN Client started")
+        
+        if not interests:
+            logger.warning("No interests to send. Exiting.")
+            client.shutdown()
+            return
+        
         logger.info("Sending Interest packets...")
         logger.info("=" * 50)
         
