@@ -165,7 +165,7 @@ cython_debug/
 .vscode/
 
 # NDN Project specific
-config.yaml
+# config.yaml  # Commented out - now tracked in git
 *.pid
 logs/
 server.pid
