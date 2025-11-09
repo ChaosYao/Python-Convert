@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package grpc;
+
+// Simple message for gRPC demo
+message Data {
+    int32 value = 1;        // Data value
+    string payload = 2;     // Data payload
+}
+
+// Simple gRPC service definition
+service SimpleService {
+    // Simple RPC: request and response
+    rpc Process(Data) returns (Data);
+}
+

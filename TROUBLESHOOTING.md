@@ -118,7 +118,73 @@ RuntimeError: asyncio.run() cannot be called from a running event loop
 - 如果仍有问题，确保使用最新版本的代码
 - 在普通终端中运行，而不是在 Jupyter notebook 中
 
-### 5. 使用错误的 Python 环境
+### 5. `InterestNack: 150` - No Route 错误
+
+**错误信息：**
+```
+ndn.types.InterestNack: 150
+Error expressing interest: 150
+```
+
+**原因：**
+- 错误代码 150 表示 "No Route"（无可用路由）
+- NFD (NDN Forwarding Daemon) 无法找到转发路径
+- 可能的原因：
+  1. NFD 未运行
+  2. FIB（转发信息基）中没有相应的前缀路由
+  3. 服务器未运行或未注册路由
+
+**解决方案：**
+
+#### 步骤 1: 检查 NFD 状态
+```bash
+# 检查 NFD 是否运行
+nfd-status
+
+# 如果未运行，启动 NFD
+nfd-start
+```
+
+#### 步骤 2: 检查 FIB 路由
+```bash
+# 查看 FIB 中的路由
+nfd-status -f
+
+# 或者使用 nfdc
+nfdc fib list
+```
+
+#### 步骤 3: 注册路由（如果需要）
+```bash
+# 注册前缀到服务器
+# 格式: nfdc register <prefix> <face-uri>
+nfdc register /yao/test/demo/B udp4://127.0.0.1:6363
+
+# 或者如果服务器在同一台机器上
+nfdc register /yao/test/demo/B face id 1
+```
+
+#### 步骤 4: 确保服务器正在运行
+```bash
+# 在另一个终端运行服务器
+python -m python_project server
+
+# 确保服务器已注册路由（查看服务器日志）
+```
+
+#### 步骤 5: 本地测试（同一台机器）
+如果客户端和服务器在同一台机器上，确保：
+1. NFD 正在运行
+2. 服务器已启动并注册了路由
+3. 客户端可以连接到 NFD
+
+**常见 NACK 错误代码：**
+- `100`: Congestion - 网络拥塞
+- `150`: No Route - 无转发路径（最常见）
+- `151`: No Route - 转发提示无效
+- `160`: No Route - 无可用转发策略
+
+### 6. 使用错误的 Python 环境
 
 **问题：**
 - 系统 Python 没有安装依赖

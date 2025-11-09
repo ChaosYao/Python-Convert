@@ -8,6 +8,7 @@ from typing import Optional
 from ndn.app import NDNApp
 from ndn.encoding import Name, InterestParam, FormalName
 from ndn.security import KeychainSqlite3, TpmFile
+from ndn.types import InterestNack, InterestTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +115,46 @@ class NDNClient:
             logger.debug(f"Content length: {len(content)} bytes")
             return bytes(content)
             
+        except InterestNack as nack:
+            # Handle NACK (Negative Acknowledgment)
+            nack_code = int(nack)
+            nack_messages = {
+                100: "Congestion - Network is congested",
+                150: "No Route - No forwarding path found (NFD cannot route this Interest)",
+                151: "No Route - Forwarding hint is invalid",
+                160: "No Route - No usable forwarding strategy",
+            }
+            message = nack_messages.get(nack_code, f"Unknown NACK code: {nack_code}")
+            logger.error(f"Interest NACK received for '{name}': {message} (code: {nack_code})")
+            
+            if nack_code == 150:
+                logger.error("=" * 60)
+                logger.error("TROUBLESHOOTING: No Route (150)")
+                logger.error("=" * 60)
+                logger.error("Possible causes:")
+                logger.error("  1. NFD (NDN Forwarding Daemon) is not running")
+                logger.error("  2. No route registered in FIB for this prefix")
+                logger.error("  3. Server is not running or not registered the route")
+                logger.error("")
+                logger.error("Solutions:")
+                logger.error("  1. Check if NFD is running: nfd-status")
+                logger.error("  2. Start NFD if not running: nfd-start")
+                logger.error("  3. Register route in FIB: nfdc register <prefix> udp4://<server-ip>")
+                logger.error("  4. Ensure server is running and registered the route")
+                logger.error("=" * 60)
+            
+            return None
+            
+        except InterestTimeout:
+            logger.error(f"Interest timeout for '{name}' (lifetime: {lifetime}ms)")
+            logger.warning("Possible causes:")
+            logger.warning("  1. Server is not responding")
+            logger.warning("  2. Network latency is too high")
+            logger.warning("  3. Interest lifetime is too short")
+            return None
+            
         except Exception as e:
-            logger.error(f"Error expressing interest: {e}", exc_info=True)
+            logger.error(f"Error expressing interest '{name}': {e}", exc_info=True)
             return None
     
     async def run(self, after_start=None):

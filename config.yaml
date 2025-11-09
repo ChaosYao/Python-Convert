@@ -14,12 +14,12 @@ ndn:
   # PIB (Public Information Base) database path
   # Path to SQLite database file for storing public keys and certificates
   # Leave empty to use default: ~/.ndn/pib.db
-  pib_path: ~/.ndn/pib.db
+  pib_path: /root/.ndn/pib.db
   
   # TPM (Trusted Platform Module) directory path
   # Directory for storing private keys
   # Leave empty to use default: ~/.ndn/ndnsec-key-file
-  tpm_path: ~/.ndn/ndnsec-key-file
+  tpm_path: /root/.ndn/ndnsec-key-file
 
 # Server-specific configuration
 server:
@@ -42,4 +42,23 @@ client:
   # Interests to send (for demo purposes)
   interests:
     - /yao/test/demo/B
+
+# gRPC configuration
+grpc:
+  # Server configuration
+  server:
+    # Server listening port
+    port: 50051
+  
+  # Client configuration
+  client:
+    # Server address (host:port)
+    host: localhost:50051
+  
+  # Test data for client demo
+  test_data:
+    - [1, "test1"]
+    - [2, "test2"]
+    - [3, "test3"]
+    - [4, "test4"]
 

@@ -142,6 +142,27 @@ class Config:
     def get_client_config(self) -> Dict[str, Any]:
         """Get client-specific configuration."""
         return self._config.get('client', {})
+    
+    def get_grpc_config(self) -> Dict[str, Any]:
+        return self._config.get('grpc', {})
+    
+    def get_grpc_server_port(self) -> int:
+        port = self.get('grpc.server.port') or os.getenv('GRPC_SERVER_PORT')
+        if port:
+            return int(port)
+        return 50051
+    
+    def get_grpc_client_host(self) -> str:
+        host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
+        if host:
+            return host
+        return "localhost:50051"
+    
+    def get_grpc_test_data(self) -> list[tuple[int, str]]:
+        test_data = self.get('grpc.test_data', [])
+        if test_data:
+            return [(item[0], item[1]) for item in test_data if len(item) >= 2]
+        return [(1, "test1"), (2, "test2"), (3, "test3"), (4, "test4")]
 
 
 # Global config instance
