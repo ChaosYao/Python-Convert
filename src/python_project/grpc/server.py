@@ -81,6 +81,7 @@ def _init_ndn_client(config_path: Optional[str] = None) -> bool:
                     if _ndn_loop is None or _shared_ndn_client is None:
                         logger.error("NDN client or loop not available")
                         request.future.set_result(None)
+                        _ndn_queue.task_done()
                         continue
                     
                     coro = _shared_ndn_client.express_interest_with_params(
@@ -196,7 +197,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             
             interest_name = interests[0]
             request_content = grpc_data_to_data_content(request)
-            logger.info(f"Forwarding gRPC request to config prefix: {interest_name}, content length: {len(request_content)}")
+            logger.info(f"Converting gRPC request to Interest: {interest_name}, content length: {len(request_content)}")
             
             try:
                 interest_lifetime = client_config.get('interest_lifetime', 4000)

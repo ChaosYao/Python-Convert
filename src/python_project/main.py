@@ -48,12 +48,6 @@ def run_server(config_path: Optional[str] = None):
     tpm_path = config.get_ndn_tpm_path()
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
-    # Enable gRPC bridge if configured
-    grpc_config = config.get_grpc_config()
-    if grpc_config.get('bridge_enabled', False):
-        server.enable_grpc_bridge()
-    
-    # Get server configuration
     server_config = config.get_server_config()
     routes = server_config.get('routes', [])
     data = server_config.get('data', {})
@@ -89,8 +83,6 @@ def run_server(config_path: Optional[str] = None):
         logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
     else:
         logger.info("No routes registered - server will not respond to Interests")
-    if server.grpc_enabled:
-        logger.info("NDN-to-gRPC bridge is enabled")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -126,9 +118,6 @@ def run_both_servers(config_path: Optional[str] = None):
     tpm_path = config.get_ndn_tpm_path()
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
-    if bridge_enabled:
-        server.enable_grpc_bridge()
-    
     server_config = config.get_server_config()
     routes = server_config.get('routes', [])
     data = server_config.get('data', {})
@@ -155,8 +144,6 @@ def run_both_servers(config_path: Optional[str] = None):
     logger.info(f"gRPC server: port {config.get_grpc_server_port()}")
     if routes:
         logger.info(f"NDN server: listening on prefixes {', '.join(routes)}")
-    if server.grpc_enabled:
-        logger.info("NDN-to-gRPC bridge is enabled")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
