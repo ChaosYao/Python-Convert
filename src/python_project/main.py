@@ -104,6 +104,7 @@ def run_both_servers(config_path: Optional[str] = None):
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
     ndn_client = NDNClient(app=server.app)
+    set_shared_ndn_client(ndn_client)
     
     grpc_config = config.get_grpc_config()
     bridge_enabled = grpc_config.get('bridge_enabled', False)

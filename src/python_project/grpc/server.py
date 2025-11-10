@@ -103,6 +103,14 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None,
         config = get_config(config_path)
         port = config.get_grpc_server_port()
     
+    import time
+    max_wait = 5
+    wait_interval = 0.1
+    waited = 0
+    while _shared_ndn_client is None and waited < max_wait:
+        time.sleep(wait_interval)
+        waited += wait_interval
+    
     if _shared_ndn_client is None:
         logger.error("NDN client not set, cannot start gRPC server")
         raise RuntimeError("NDN client must be set before starting gRPC server")
