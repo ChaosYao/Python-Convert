@@ -85,7 +85,11 @@ class NDNClient:
             return bytes(content)
             
         except InterestNack as nack:
-            nack_code = int(nack)
+            try:
+                nack_code = nack.args[0] if nack.args else int(str(nack))
+            except (ValueError, TypeError, IndexError):
+                nack_code = 150
+            
             nack_messages = {
                 100: "Congestion - Network is congested",
                 150: "No Route - No forwarding path found (NFD cannot route this Interest)",
@@ -151,7 +155,10 @@ class NDNClient:
             return bytes(content)
             
         except InterestNack as nack:
-            nack_code = int(nack)
+            try:
+                nack_code = nack.args[0] if nack.args else int(str(nack))
+            except (ValueError, TypeError, IndexError):
+                nack_code = 150
             logger.error(f"Interest NACK received for '{name}': code {nack_code}")
             return None
             
