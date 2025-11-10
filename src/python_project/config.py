@@ -143,6 +143,10 @@ class Config:
         """Get client-specific configuration."""
         return self._config.get('client', {})
     
+    def get_client_disable_cache(self) -> bool:
+        """Get disable_cache setting from client config."""
+        return self.get('client.disable_cache', False)
+    
     def get_grpc_config(self) -> Dict[str, Any]:
         return self._config.get('grpc', {})
     

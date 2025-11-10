@@ -28,6 +28,7 @@ class InterestRequest:
     app_param: bytes
     lifetime: int
     future: Future
+    must_be_fresh: bool = False
 
 
 _shared_ndn_client: Optional[NDNClient] = None
@@ -87,7 +88,8 @@ def _init_ndn_client(config_path: Optional[str] = None) -> bool:
                     coro = _shared_ndn_client.express_interest_with_params(
                         request.interest_name,
                         request.app_param,
-                        lifetime=request.lifetime
+                        lifetime=request.lifetime,
+                        must_be_fresh=request.must_be_fresh
                     )
                     
                     future = asyncio.run_coroutine_threadsafe(coro, _ndn_loop)
@@ -145,7 +147,7 @@ def _get_shared_ndn_client(config_path: Optional[str] = None) -> Optional[NDNCli
     return _shared_ndn_client
 
 
-def _submit_interest_request(interest_name: str, app_param: bytes, lifetime: int) -> Optional[bytes]:
+def _submit_interest_request(interest_name: str, app_param: bytes, lifetime: int, must_be_fresh: bool = False) -> Optional[bytes]:
     global _ndn_queue
     
     if _ndn_queue is None:
@@ -160,7 +162,8 @@ def _submit_interest_request(interest_name: str, app_param: bytes, lifetime: int
         interest_name=interest_name,
         app_param=app_param,
         lifetime=lifetime,
-        future=future
+        future=future,
+        must_be_fresh=must_be_fresh
     )
     
     _ndn_queue.put(request)
@@ -201,7 +204,8 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             
             try:
                 interest_lifetime = client_config.get('interest_lifetime', 4000)
-                content = _submit_interest_request(interest_name, request_content, interest_lifetime)
+                disable_cache = self.config.get_client_disable_cache()
+                content = _submit_interest_request(interest_name, request_content, interest_lifetime, must_be_fresh=disable_cache)
                 
                 if content:
                     response = data_content_to_grpc_data(content)

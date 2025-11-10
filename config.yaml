@@ -39,6 +39,10 @@ client:
   # Interest lifetime (in milliseconds)
   interest_lifetime: 4000
   
+  # Disable cache (must_be_fresh flag)
+  # If true, Interest will require fresh data and bypass cache
+  disable_cache: true
+  
   # Interests to send (for demo purposes)
   interests:
     - /yao/test/demo/B
