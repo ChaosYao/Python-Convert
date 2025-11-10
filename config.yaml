@@ -58,9 +58,6 @@ grpc:
   # Test data for client demo (value, payload)
   test_data:
     - [1, "test1"]
-    - [2, "test2"]
-    - [3, "test3"]
-    - [4, "test4"]
   
   # Bridge configuration
   bridge_enabled: false  # enable ndn-to-grpc bridge in NDN server
