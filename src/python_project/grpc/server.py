@@ -15,11 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 _shared_ndn_client: Optional[NDNClient] = None
+_ndn_loop = None
 
 
-def set_shared_ndn_client(ndn_client: NDNClient):
-    global _shared_ndn_client
+def set_shared_ndn_client(ndn_client: NDNClient, loop=None):
+    global _shared_ndn_client, _ndn_loop
     _shared_ndn_client = ndn_client
+    _ndn_loop = loop
     logger.info("Shared NDN client set for gRPC server")
 
 
@@ -51,12 +53,26 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             try:
                 interest_lifetime = client_config.get('interest_lifetime', 4000)
                 disable_cache = self.config.get_client_disable_cache()
-                content = await _shared_ndn_client.express_interest_with_params(
-                    interest_name,
-                    request_content,
-                    lifetime=interest_lifetime,
-                    must_be_fresh=disable_cache
-                )
+                
+                if _ndn_loop is not None and _ndn_loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        _shared_ndn_client.express_interest_with_params(
+                            interest_name,
+                            request_content,
+                            lifetime=interest_lifetime,
+                            must_be_fresh=disable_cache
+                        ),
+                        _ndn_loop
+                    )
+                    timeout = (interest_lifetime / 1000) + 60
+                    content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+                else:
+                    content = await _shared_ndn_client.express_interest_with_params(
+                        interest_name,
+                        request_content,
+                        lifetime=interest_lifetime,
+                        must_be_fresh=disable_cache
+                    )
                 
                 if content:
                     response = data_content_to_grpc_data(content)

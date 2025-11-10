@@ -104,7 +104,6 @@ def run_both_servers(config_path: Optional[str] = None):
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
     ndn_client = NDNClient(app=server.app)
-    set_shared_ndn_client(ndn_client)
     
     grpc_config = config.get_grpc_config()
     bridge_enabled = grpc_config.get('bridge_enabled', False)
@@ -150,8 +149,14 @@ def run_both_servers(config_path: Optional[str] = None):
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
+    async def capture_loop():
+        await asyncio.sleep(0.5)
+        loop = asyncio.get_event_loop()
+        set_shared_ndn_client(ndn_client, loop=loop)
+        logger.info(f"NDN event loop captured for gRPC server: {loop}")
+    
     try:
-        server.app.run_forever()
+        server.app.run_forever(after_start=capture_loop())
     except KeyboardInterrupt:
         logger.info("Shutting down servers...")
         server.shutdown()
