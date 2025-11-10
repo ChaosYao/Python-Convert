@@ -32,6 +32,12 @@ def get_mode(config_path: Optional[str] = None) -> Optional[str]:
 
 def main():
     config_path = None
+    enable_ndn = False
+    
+    if '--enable-ndn' in sys.argv:
+        enable_ndn = True
+        sys.argv.remove('--enable-ndn')
+    
     if len(sys.argv) > 1 and sys.argv[1].startswith('--config='):
         config_path = sys.argv[1].split('=', 1)[1]
         sys.argv = [sys.argv[0]] + sys.argv[2:]
@@ -51,7 +57,7 @@ def main():
     
     if mode == 'server':
         try:
-            run_server(config_path=config_path)
+            run_server(config_path=config_path, enable_ndn=enable_ndn)
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:

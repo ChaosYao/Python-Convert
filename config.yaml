@@ -29,7 +29,7 @@ server:
   
   # Data to store (name -> content mapping)
   data:
-    /yao/test/demo/B: "Hello from NDN Server!"
+    /yao/test/demo/B: '{"value": 0, "payload": "Hello from NDN Server!"}'
   
   # Freshness period for Data packets (in milliseconds)
   freshness_period: 10000
@@ -55,10 +55,13 @@ grpc:
     # Server address (host:port)
     host: localhost:50051
   
-  # Test data for client demo
+  # Test data for client demo (value, payload)
   test_data:
     - [1, "test1"]
     - [2, "test2"]
     - [3, "test3"]
     - [4, "test4"]
+  
+  # Bridge configuration
+  bridge_enabled: false  # enable ndn-to-grpc bridge in NDN server
 

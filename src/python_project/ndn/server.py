@@ -1,6 +1,4 @@
-"""
-NDN Server for receiving Interest packets and sending Data packets.
-"""
+# NDN Server for receiving Interest packets and sending Data packets
 import asyncio
 import logging
 import os
@@ -11,40 +9,32 @@ from ndn.security import KeychainSqlite3, TpmFile
 
 logger = logging.getLogger(__name__)
 
+try:
+    from ..grpc.client import SimpleClient
+    from ..grpc.converter import data_content_to_grpc_data, grpc_data_to_data_content
+    GRPC_AVAILABLE = True
+except ImportError:
+    GRPC_AVAILABLE = False
+    logger.warning("gRPC module not available, NDN-to-gRPC conversion disabled")
+
 
 class NDNServer:
-    """NDN Server to receive Interest packets and send Data packets."""
-    
     def __init__(
         self,
         app: Optional[NDNApp] = None,
         pib_path: Optional[str] = None,
         tpm_path: Optional[str] = None
     ):
-        """
-        Initialize NDN Server.
-        
-        Args:
-            app: Optional NDNApp instance. If None, creates a new one.
-            pib_path: Optional path to PIB (Public Information Base) database.
-                     If None, uses default or environment variable NDN_PIB_PATH.
-            tpm_path: Optional path to TPM (Trusted Platform Module) directory.
-                     If None, uses default or environment variable NDN_TPM_PATH.
-        """
         if app is not None:
             self.app = app
         else:
-            # Get paths from environment variables if not provided
             pib_path = pib_path or os.getenv('NDN_PIB_PATH')
             tpm_path = tpm_path or os.getenv('NDN_TPM_PATH')
             
-            # Create Keychain with custom paths if provided
             if pib_path or tpm_path:
-                # Expand ~ and relative paths
                 if pib_path:
                     pib_path = os.path.expanduser(pib_path)
                     pib_path = os.path.abspath(pib_path)
-                    # Create directory if it doesn't exist
                     pib_dir = os.path.dirname(pib_path)
                     if pib_dir and not os.path.exists(pib_dir):
                         os.makedirs(pib_dir, mode=0o700, exist_ok=True)
@@ -53,7 +43,6 @@ class NDNServer:
                 if tpm_path:
                     tpm_path = os.path.expanduser(tpm_path)
                     tpm_path = os.path.abspath(tpm_path)
-                    # Create directory if it doesn't exist
                     if not os.path.exists(tpm_path):
                         os.makedirs(tpm_path, mode=0o700, exist_ok=True)
                         logger.info(f"Created TPM directory: {tpm_path}")
@@ -80,36 +69,55 @@ class NDNServer:
                 logger.debug("Using default PIB and TPM paths")
         
         self.data_store: dict[str, bytes] = {}
+        self.grpc_client: Optional[SimpleClient] = None
+        self.grpc_enabled = False
+    
+    def enable_grpc_bridge(self, grpc_server_address: Optional[str] = None):
+        if not GRPC_AVAILABLE:
+            logger.warning("gRPC not available, bridge disabled")
+            return
+        
+        from ..config import get_config
+        config = get_config()
+        
+        if grpc_server_address is None:
+            grpc_server_address = config.get_grpc_client_host()
+        
+        self.grpc_client = SimpleClient(server_address=grpc_server_address)
+        self.grpc_client.connect()
+        self.grpc_enabled = True
+        logger.info(f"NDN-to-gRPC bridge enabled, connecting to {grpc_server_address}")
     
     def register_route(self, prefix: str, handler: Optional[Callable] = None):
-        """
-        Register a route to handle Interests with a given prefix.
-        
-        Args:
-            prefix: Name prefix to register (e.g., '/example')
-            handler: Optional handler function that takes (name, param, app_param).
-                     If None, uses default handler that returns data from data_store.
-        """
         def default_handler(name: FormalName, param: InterestParam, app_param: bytes):
-            """Default handler that looks up data in data_store."""
             name_str = Name.to_str(name)
-            logger.info(f"Received Interest: {name_str}")
+            logger.info(f"Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
             
-            if name_str in self.data_store:
+            if self.grpc_enabled and app_param:
+                logger.info(f"Converting Interest app_param to gRPC request")
+                try:
+                    grpc_request = data_content_to_grpc_data(app_param)
+                    logger.info(f"Calling gRPC server: value={grpc_request.value}, payload={grpc_request.payload}")
+                    
+                    grpc_response = self.grpc_client.process_data(grpc_request.value, grpc_request.payload)
+                    
+                    content = grpc_data_to_data_content(grpc_response)
+                    logger.info(f"Received gRPC response, converted to Data: value={grpc_response.value}, payload={grpc_response.payload}")
+                except Exception as e:
+                    logger.error(f"Error in gRPC bridge: {e}", exc_info=True)
+                    content = f"gRPC error: {str(e)}".encode()
+            elif name_str in self.data_store:
                 content = self.data_store[name_str]
             else:
-                # Return a default message if not found
                 content = f"Data not found for {name_str}".encode()
                 logger.warning(f"Data not found for {name_str}")
             
-            # Send Data packet
             logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
             self.app.put_data(name, content=content, freshness_period=10000)
         
         if handler:
             @self.app.route(prefix)
             def interest_handler(name: FormalName, param: InterestParam, app_param: bytes):
-                """Handle incoming Interest with custom handler."""
                 name_str = Name.to_str(name)
                 logger.info(f"Received Interest: {name_str}")
                 try:
@@ -128,23 +136,16 @@ class NDNServer:
         logger.info(f"Registered route: {prefix}")
     
     def store_data(self, name: str, content: bytes):
-        """
-        Store data for a given name.
-        
-        Args:
-            name: Name to store data under
-            content: Content bytes to store
-        """
         self.data_store[name] = content
         logger.info(f"Stored data for: {name}")
     
     async def run(self):
-        """Run the NDN server app."""
         logger.info("Starting NDN server...")
         await self.app.run_forever()
     
     def shutdown(self):
-        """Shutdown the server."""
+        if self.grpc_client:
+            self.grpc_client.disconnect()
         if self.app:
             self.app.shutdown()
 

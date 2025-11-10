@@ -1,4 +1,5 @@
 # gRPC simple server implementation
+import asyncio
 import logging
 from concurrent import futures
 from typing import Optional
@@ -6,45 +7,92 @@ from typing import Optional
 import grpc
 
 from ..config import get_config
+from ..ndn.client import NDNClient
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
+from .converter import data_content_to_grpc_data, grpc_data_to_data_content
 
 logger = logging.getLogger(__name__)
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
+    def __init__(self, ndn_client: Optional[NDNClient] = None, enable_ndn: bool = False, config_path: Optional[str] = None):
+        self.ndn_client = ndn_client
+        self.enable_ndn = enable_ndn
+        self.loop = None
+        self.config = get_config(config_path)
+        if enable_ndn and ndn_client is None:
+            pib_path = self.config.get_ndn_pib_path()
+            tpm_path = self.config.get_ndn_tpm_path()
+            self.ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+    
     def Process(self, request: bidirectional_pb2.Data, 
                 context: grpc.ServicerContext) -> bidirectional_pb2.Data:
-        logger.info(f"Received data: value={request.value}, payload={request.payload}")
+        logger.info(f"Received gRPC request: value={request.value}, payload={request.payload}")
         
-        response = bidirectional_pb2.Data(
-            value=request.value * 2,
-            payload=f"Processed: {request.payload}"
-        )
-        
-        logger.info(f"Sending response: value={response.value}, payload={response.payload}")
-        return response
+        if self.enable_ndn and self.ndn_client:
+            client_config = self.config.get_client_config()
+            interests = client_config.get('interests', [])
+            
+            if not interests:
+                logger.warning("No interests configured, cannot send to NDN")
+                return bidirectional_pb2.Data(value=0, payload="No interests configured")
+            
+            interest_name = interests[0]
+            request_content = grpc_data_to_data_content(request)
+            logger.info(f"Forwarding gRPC request to config prefix: {interest_name}, content length: {len(request_content)}")
+            
+            try:
+                if self.loop is None:
+                    self.loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self.loop)
+                
+                interest_lifetime = client_config.get('interest_lifetime', 4000)
+                content = self.loop.run_until_complete(
+                    self.ndn_client.express_interest_with_params(interest_name, request_content, lifetime=interest_lifetime)
+                )
+                
+                if content:
+                    response = data_content_to_grpc_data(content)
+                    logger.info(f"Received Data from NDN, converted to gRPC response: value={response.value}, payload={response.payload}")
+                    return response
+                else:
+                    logger.warning("No Data received from NDN")
+                    return bidirectional_pb2.Data(value=0, payload="No response from NDN")
+            except Exception as e:
+                logger.error(f"Error processing request: {e}", exc_info=True)
+                return bidirectional_pb2.Data(value=0, payload=f"Error: {str(e)}")
+        else:
+            response = bidirectional_pb2.Data(
+                value=request.value * 2,
+                payload=f"Processed: {request.payload}"
+            )
+            logger.info(f"Sending response: value={response.value}, payload={response.payload}")
+            return response
 
 
-def create_server(port: Optional[int] = None, config_path: Optional[str] = None) -> grpc.Server:
+def create_server(port: Optional[int] = None, config_path: Optional[str] = None, 
+                  ndn_client: Optional[NDNClient] = None, enable_ndn: bool = False) -> grpc.Server:
     if port is None:
         config = get_config(config_path)
         port = config.get_grpc_server_port()
     
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(
-        SimpleService(), server
+        SimpleService(ndn_client=ndn_client, enable_ndn=enable_ndn, config_path=config_path), server
     )
     
     listen_addr = f'[::]:{port}'
     server.add_insecure_port(listen_addr)
     
     logger.info(f"gRPC server starting on port {port}")
+    if enable_ndn:
+        logger.info("gRPC-to-NDN conversion enabled")
     return server
 
 
-def run_server(port: Optional[int] = None, config_path: Optional[str] = None):
-    server = create_server(port, config_path)
+def run_server(port: Optional[int] = None, config_path: Optional[str] = None, enable_ndn: bool = False):
+    server = create_server(port, config_path, enable_ndn=enable_ndn)
     server.start()
     logger.info("gRPC server started, waiting for connections...")
     

@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import logging
+import threading
 from typing import Optional
 
 from .ndn.client import NDNClient
@@ -21,36 +22,18 @@ logger = logging.getLogger(__name__)
 
 
 def get_mode(config_path: Optional[str] = None) -> Optional[str]:
-    """
-    Get the running mode (server or client) from various sources.
-    
-    Priority order:
-    1. Command line argument
-    2. Environment variable MODE
-    3. Configuration file
-    4. None (will show usage)
-    
-    Args:
-        config_path: Optional path to configuration file
-        
-    Returns:
-        'server', 'client', or None
-    """
-    # Check command line argument
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
-        if mode in ['server', 'client']:
+        if mode in ['server', 'client', 'both']:
             return mode
     
-    # Check environment variable
     mode = os.getenv('MODE', '').lower()
-    if mode in ['server', 'client']:
+    if mode in ['server', 'client', 'both']:
         return mode
     
-    # Check configuration file
     config = get_config(config_path)
     mode = config.get_mode()
-    if mode and mode.lower() in ['server', 'client']:
+    if mode and mode.lower() in ['server', 'client', 'both']:
         return mode.lower()
     
     return None
@@ -64,6 +47,11 @@ def run_server(config_path: Optional[str] = None):
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
+    
+    # Enable gRPC bridge if configured
+    grpc_config = config.get_grpc_config()
+    if grpc_config.get('bridge_enabled', False):
+        server.enable_grpc_bridge()
     
     # Get server configuration
     server_config = config.get_server_config()
@@ -101,6 +89,8 @@ def run_server(config_path: Optional[str] = None):
         logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
     else:
         logger.info("No routes registered - server will not respond to Interests")
+    if server.grpc_enabled:
+        logger.info("NDN-to-gRPC bridge is enabled")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -110,6 +100,72 @@ def run_server(config_path: Optional[str] = None):
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.shutdown()
+
+
+def run_both_servers(config_path: Optional[str] = None):
+    config = get_config(config_path)
+    
+    from .grpc.server import run_server as run_grpc_server
+    
+    grpc_config = config.get_grpc_config()
+    bridge_enabled = grpc_config.get('bridge_enabled', False)
+    
+    def start_grpc_server():
+        try:
+            run_grpc_server(config_path=config_path, enable_ndn=True)
+        except Exception as e:
+            logger.error(f"gRPC server error: {e}", exc_info=True)
+    
+    grpc_thread = threading.Thread(target=start_grpc_server, daemon=True)
+    grpc_thread.start()
+    
+    logger.info("gRPC server started in background thread")
+    logger.info("=" * 50)
+    
+    pib_path = config.get_ndn_pib_path()
+    tpm_path = config.get_ndn_tpm_path()
+    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
+    
+    if bridge_enabled:
+        server.enable_grpc_bridge()
+    
+    server_config = config.get_server_config()
+    routes = server_config.get('routes', [])
+    data = server_config.get('data', {})
+    
+    logger.info(f"Routes to register: {routes}")
+    logger.info(f"Data to store: {list(data.keys())}")
+    
+    if not routes:
+        logger.warning("No routes configured in config file!")
+    else:
+        for route in routes:
+            server.register_route(route)
+    
+    if not data:
+        logger.warning("No data configured in config file!")
+    else:
+        for name, content in data.items():
+            if isinstance(content, str):
+                content = content.encode()
+            server.store_data(name, content)
+    
+    logger.info("=" * 50)
+    logger.info("Both servers started")
+    logger.info(f"gRPC server: port {config.get_grpc_server_port()}")
+    if routes:
+        logger.info(f"NDN server: listening on prefixes {', '.join(routes)}")
+    if server.grpc_enabled:
+        logger.info("NDN-to-gRPC bridge is enabled")
+    logger.info("Press Ctrl+C to stop")
+    logger.info("=" * 50)
+    
+    try:
+        server.app.run_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down servers...")
+        server.shutdown()
+        logger.info("Servers stopped")
 
 
 def run_client(config_path: Optional[str] = None):
@@ -196,20 +252,24 @@ def main():
     logger.info("Note: This demo requires NDN network to be running.")
     logger.info("For local testing, you may need to set up NFD (NDN Forwarding Daemon).")
     
-    # Get mode from various sources
     mode = get_mode(config_path)
     
     if mode == 'server':
         try:
-            # run_server() calls app.run_forever() which handles event loop internally
             run_server(config_path)
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
+    elif mode == 'both':
+        try:
+            run_both_servers(config_path)
+        except KeyboardInterrupt:
+            logger.info("Servers stopped by user")
+        except Exception as e:
+            logger.error(f"Error: {e}", exc_info=True)
     elif mode == 'client':
         try:
-            # run_client() calls app.run_forever() which handles event loop internally
             run_client(config_path)
         except KeyboardInterrupt:
             logger.info("Client stopped by user")
@@ -217,8 +277,8 @@ def main():
             logger.error(f"Error: {e}", exc_info=True)
     else:
         logger.info("Usage:")
-        logger.info("  Command line: python -m python_project [server|client] [--config=path/to/config.yaml]")
-        logger.info("  Environment:  MODE=server|client python -m python_project")
+        logger.info("  Command line: python -m python_project [server|client|both] [--config=path/to/config.yaml]")
+        logger.info("  Environment:  MODE=server|client|both python -m python_project")
         logger.info("  Config file: Create config.yaml (see config.yaml.example)")
         logger.info("")
         logger.info("Configuration Priority:")
@@ -239,10 +299,10 @@ def main():
         logger.info("  LOG_LEVEL: DEBUG|INFO|WARNING|ERROR|CRITICAL")
         logger.info("")
         logger.info("Examples:")
-        logger.info("  python -m python_project server")
-        logger.info("  python -m python_project client --config=my_config.yaml")
-        logger.info("  MODE=server python -m python_project")
-        logger.info("  NDN_PIB_PATH=/path/to/pib.db python -m python_project server")
+        logger.info("  python -m python_project server      # Start NDN server only")
+        logger.info("  python -m python_project both       # Start both NDN and gRPC servers")
+        logger.info("  python -m python_project client    # Start NDN client")
+        logger.info("  MODE=both python -m python_project   # Start both servers")
         sys.exit(1)
 
 
