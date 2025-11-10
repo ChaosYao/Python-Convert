@@ -140,10 +140,10 @@ class NDNClient:
                 interest_param=InterestParam(
                     lifetime=lifetime,
                     can_be_prefix=can_be_prefix,
-                    must_be_fresh=must_be_fresh,
-                    app_param=app_param
+                    must_be_fresh=must_be_fresh
                 ),
-                must_be_fresh=must_be_fresh
+                must_be_fresh=must_be_fresh,
+                app_param=app_param
             )
             
             logger.info(f"Received Data: {Name.to_str(data_name)}")
