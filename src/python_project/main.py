@@ -97,7 +97,14 @@ def run_server(config_path: Optional[str] = None):
 def run_both_servers(config_path: Optional[str] = None):
     config = get_config(config_path)
     
-    from .grpc.server import run_server as run_grpc_server
+    from .grpc.server import run_server as run_grpc_server, set_shared_ndn_client
+    
+    pib_path = config.get_ndn_pib_path()
+    tpm_path = config.get_ndn_tpm_path()
+    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
+    
+    ndn_client = NDNClient(app=server.app)
+    set_shared_ndn_client(ndn_client)
     
     grpc_config = config.get_grpc_config()
     bridge_enabled = grpc_config.get('bridge_enabled', False)
@@ -113,10 +120,6 @@ def run_both_servers(config_path: Optional[str] = None):
     
     logger.info("gRPC server started in background thread")
     logger.info("=" * 50)
-    
-    pib_path = config.get_ndn_pib_path()
-    tpm_path = config.get_ndn_tpm_path()
-    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
     server_config = config.get_server_config()
     routes = server_config.get('routes', [])
