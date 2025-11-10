@@ -26,7 +26,7 @@ def set_shared_ndn_client(ndn_client: NDNClient, loop=None):
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
-    def __init__(self, ndn_client: Optional[NDNClient] = None, enable_ndn: bool = False, config_path: Optional[str] = None):
+    def __init__(self, ndn_client: Optional[NDNClient] = None, enable_ndn: bool = True, config_path: Optional[str] = None):
         self.enable_ndn = enable_ndn
         self.config = get_config(config_path)
     
