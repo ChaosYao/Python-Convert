@@ -14,6 +14,34 @@
 2. **Update config.yaml**
    - Set `grpc.bridge_enabled: true` to enable NDN-to-gRPC bridge
 
+## Testing NDN Client Only
+
+To verify NDN client independently:
+
+**Terminal 1: Start NDN Server**
+```bash
+cd /Users/yaoqingqi/Yao/github/Python-Convert
+source venv/bin/activate
+python -m python_project server
+```
+
+**Terminal 2: Test NDN Client**
+```bash
+cd /Users/yaoqingqi/Yao/github/Python-Convert
+source venv/bin/activate
+python test_ndn_client.py
+```
+
+Or use the built-in client:
+```bash
+python -m python_project client
+```
+
+**Expected Result:**
+- NDN client should send Interest packets
+- NDN server should respond with Data packets
+- Client should receive and display the content
+
 ## Testing Steps
 
 ### Option 1: Manual Testing (Recommended)

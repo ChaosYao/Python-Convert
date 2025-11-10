@@ -4,7 +4,8 @@ import logging
 import threading
 import time
 from concurrent import futures
-from typing import Optional
+from typing import Optional, Callable, Any
+from queue import Queue
 
 import grpc
 
@@ -19,31 +20,58 @@ logger = logging.getLogger(__name__)
 _shared_ndn_client: Optional[NDNClient] = None
 _shared_ndn_thread: Optional[threading.Thread] = None
 _ndn_lock = threading.Lock()
+_ndn_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _get_shared_ndn_client(config_path: Optional[str] = None) -> Optional[NDNClient]:
-    global _shared_ndn_client, _shared_ndn_thread
+    global _shared_ndn_client, _shared_ndn_thread, _ndn_loop
     
     with _ndn_lock:
         if _shared_ndn_client is None:
             config = get_config(config_path)
             pib_path = config.get_ndn_pib_path()
             tpm_path = config.get_ndn_tpm_path()
-            _shared_ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
             
-            if _shared_ndn_client and _shared_ndn_client.app:
-                def run_ndn_app():
-                    try:
+            def create_and_run_ndn_client():
+                global _shared_ndn_client, _ndn_loop
+                try:
+                    _ndn_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(_ndn_loop)
+                    _shared_ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+                    if _shared_ndn_client and _shared_ndn_client.app:
+                        logger.info("NDN client created in background thread")
                         _shared_ndn_client.app.run_forever()
-                    except Exception as e:
-                        logger.error(f"NDN client app error: {e}", exc_info=True)
-                
-                _shared_ndn_thread = threading.Thread(target=run_ndn_app, daemon=True)
-                _shared_ndn_thread.start()
-                logger.info("Shared NDN client app started in background thread")
-                time.sleep(1)
+                except Exception as e:
+                    logger.error(f"NDN client app error: {e}", exc_info=True)
+            
+            _shared_ndn_thread = threading.Thread(target=create_and_run_ndn_client, daemon=True)
+            _shared_ndn_thread.start()
+            logger.info("NDN client thread started, waiting for initialization...")
+            
+            max_wait = 10
+            waited = 0
+            while _shared_ndn_client is None and waited < max_wait:
+                time.sleep(0.1)
+                waited += 0.1
+            
+            if _shared_ndn_client is None:
+                logger.error("Failed to create NDN client in background thread")
+                return None
         
         return _shared_ndn_client
+
+
+def _run_in_ndn_thread(coro):
+    global _ndn_loop
+    if _ndn_loop is None:
+        return None
+    
+    future = asyncio.run_coroutine_threadsafe(coro, _ndn_loop)
+    try:
+        return future.result(timeout=5)
+    except Exception as e:
+        logger.error(f"Error running in NDN thread: {e}", exc_info=True)
+        return None
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
@@ -72,12 +100,8 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             logger.info(f"Forwarding gRPC request to config prefix: {interest_name}, content length: {len(request_content)}")
             
             try:
-                if self.loop is None:
-                    self.loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(self.loop)
-                
                 interest_lifetime = client_config.get('interest_lifetime', 4000)
-                content = self.loop.run_until_complete(
+                content = _run_in_ndn_thread(
                     self.ndn_client.express_interest_with_params(interest_name, request_content, lifetime=interest_lifetime)
                 )
                 
