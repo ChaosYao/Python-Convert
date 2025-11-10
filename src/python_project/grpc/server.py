@@ -1,6 +1,8 @@
 # gRPC simple server implementation
 import asyncio
 import logging
+import threading
+import time
 from concurrent import futures
 from typing import Optional
 
@@ -14,6 +16,35 @@ from .converter import data_content_to_grpc_data, grpc_data_to_data_content
 
 logger = logging.getLogger(__name__)
 
+_shared_ndn_client: Optional[NDNClient] = None
+_shared_ndn_thread: Optional[threading.Thread] = None
+_ndn_lock = threading.Lock()
+
+
+def _get_shared_ndn_client(config_path: Optional[str] = None) -> Optional[NDNClient]:
+    global _shared_ndn_client, _shared_ndn_thread
+    
+    with _ndn_lock:
+        if _shared_ndn_client is None:
+            config = get_config(config_path)
+            pib_path = config.get_ndn_pib_path()
+            tpm_path = config.get_ndn_tpm_path()
+            _shared_ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+            
+            if _shared_ndn_client and _shared_ndn_client.app:
+                def run_ndn_app():
+                    try:
+                        _shared_ndn_client.app.run_forever()
+                    except Exception as e:
+                        logger.error(f"NDN client app error: {e}", exc_info=True)
+                
+                _shared_ndn_thread = threading.Thread(target=run_ndn_app, daemon=True)
+                _shared_ndn_thread.start()
+                logger.info("Shared NDN client app started in background thread")
+                time.sleep(1)
+        
+        return _shared_ndn_client
+
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
     def __init__(self, ndn_client: Optional[NDNClient] = None, enable_ndn: bool = False, config_path: Optional[str] = None):
@@ -22,9 +53,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         self.loop = None
         self.config = get_config(config_path)
         if enable_ndn and ndn_client is None:
-            pib_path = self.config.get_ndn_pib_path()
-            tpm_path = self.config.get_ndn_tpm_path()
-            self.ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+            self.ndn_client = _get_shared_ndn_client(config_path)
     
     def Process(self, request: bidirectional_pb2.Data, 
                 context: grpc.ServicerContext) -> bidirectional_pb2.Data:
