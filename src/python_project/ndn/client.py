@@ -59,7 +59,7 @@ class NDNClient:
                     raise
             else:
                 self.app = NDNApp()
-                logger.debug("Using default PIB and TPM paths")
+                logger.info("Using default PIB and TPM paths")
     
     async def express_interest(
         self,
@@ -81,7 +81,7 @@ class NDNClient:
             )
             
             logger.info(f"Received Data: {Name.to_str(data_name)}")
-            logger.debug(f"Content length: {len(content)} bytes")
+            logger.info(f"Content length: {len(content)} bytes")
             return bytes(content)
             
         except InterestNack as nack:
@@ -147,7 +147,7 @@ class NDNClient:
             )
             
             logger.info(f"Received Data: {Name.to_str(data_name)}")
-            logger.debug(f"Content length: {len(content)} bytes")
+            logger.info(f"Content length: {len(content)} bytes")
             return bytes(content)
             
         except InterestNack as nack:

@@ -58,7 +58,7 @@ class Config:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     self._config = yaml.safe_load(f) or {}
                 logger.info(f"Loaded configuration from: {config_file}")
-                logger.debug(f"Config content: {self._config}")
+                logger.info(f"Config content: {self._config}")
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_file}: {e}")
                 self._config = {}
@@ -66,8 +66,8 @@ class Config:
             if self.config_path:
                 logger.warning(f"Configuration file not found: {self.config_path}")
             else:
-                logger.debug("No configuration file found, using defaults and environment variables")
-                logger.debug(f"Searched paths: {possible_paths}")
+                logger.info("No configuration file found, using defaults and environment variables")
+                logger.info(f"Searched paths: {possible_paths}")
     
     def get(self, key: str, default: Any = None) -> Any:
         """

@@ -66,7 +66,7 @@ class NDNServer:
                     raise
             else:
                 self.app = NDNApp()
-                logger.debug("Using default PIB and TPM paths")
+                logger.info("Using default PIB and TPM paths")
         
         self.data_store: dict[str, bytes] = {}
         self.grpc_client: Optional[SimpleClient] = None

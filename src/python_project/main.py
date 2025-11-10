@@ -59,7 +59,7 @@ def run_server(config_path: Optional[str] = None):
     data = server_config.get('data', {})
     
     # Log configuration for debugging
-    logger.debug(f"Server config loaded: {server_config}")
+    logger.info(f"Server config loaded: {server_config}")
     logger.info(f"Routes to register: {routes}")
     logger.info(f"Data to store: {list(data.keys())}")
     
@@ -183,7 +183,7 @@ def run_client(config_path: Optional[str] = None):
     interest_lifetime = client_config.get('interest_lifetime', 4000)
     
     # Log configuration for debugging
-    logger.debug(f"Client config loaded: {client_config}")
+    logger.info(f"Client config loaded: {client_config}")
     
     # Warn if no interests configured
     if not interests:

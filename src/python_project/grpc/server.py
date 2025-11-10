@@ -76,7 +76,7 @@ def _init_ndn_client(config_path: Optional[str] = None) -> bool:
                         logger.info("NDN queue consumer received shutdown signal")
                         break
                     
-                    logger.debug(f"Processing interest request: {request.request_id}, name: {request.interest_name}")
+                    logger.info(f"Processing interest request: {request.request_id}, name: {request.interest_name}")
                     
                     if _ndn_loop is None or _shared_ndn_client is None:
                         logger.error("NDN client or loop not available")
@@ -94,7 +94,7 @@ def _init_ndn_client(config_path: Optional[str] = None) -> bool:
                         timeout = (request.lifetime / 1000) + 2
                         content = future.result(timeout=timeout)
                         request.future.set_result(content)
-                        logger.debug(f"Interest request {request.request_id} completed")
+                        logger.info(f"Interest request {request.request_id} completed")
                     except TimeoutError:
                         logger.error(f"Timeout waiting for NDN response: {request.request_id}")
                         request.future.set_result(None)
@@ -163,7 +163,7 @@ def _submit_interest_request(interest_name: str, app_param: bytes, lifetime: int
     )
     
     _ndn_queue.put(request)
-    logger.debug(f"Interest request {request_id} submitted to queue")
+    logger.info(f"Interest request {request_id} submitted to queue")
     
     try:
         timeout = (lifetime / 1000) + 2
