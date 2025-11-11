@@ -128,7 +128,6 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         async def run_ndn_client():
             await _ndn_client.app.run_forever()
         
-        import asyncio
         ndn_task = asyncio.create_task(run_ndn_client())
         await asyncio.sleep(1.0)
         logger.info("NDN client started in gRPC server event loop")
