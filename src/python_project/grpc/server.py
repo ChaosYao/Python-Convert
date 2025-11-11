@@ -14,30 +14,23 @@ from .converter import data_content_to_grpc_data, grpc_data_to_data_content
 logger = logging.getLogger(__name__)
 
 
-_shared_ndn_client: Optional[NDNClient] = None
-_ndn_loop = None
-
-
-def set_shared_ndn_client(ndn_client: NDNClient, loop=None):
-    global _shared_ndn_client, _ndn_loop
-    _shared_ndn_client = ndn_client
-    _ndn_loop = loop
-    logger.info("Shared NDN client set for gRPC server")
+_ndn_client: Optional[NDNClient] = None
+_ndn_lock: Optional[asyncio.Lock] = None
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
-    def __init__(self, ndn_client: Optional[NDNClient] = None, enable_ndn: bool = True, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None):
         self.config = get_config(config_path)
     
     async def Process(self, request: bidirectional_pb2.Data, 
                       context: grpc.ServicerContext) -> bidirectional_pb2.Data:
         logger.info(f"Received gRPC request: value={request.value}, payload={request.payload}")
         
-        if _shared_ndn_client is None:
-            logger.error("NDN client not set")
+        if _ndn_client is None:
+            logger.error("NDN client not initialized")
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("NDN client not set")
-            return bidirectional_pb2.Data(value=0, payload="NDN client not set")
+            context.set_details("NDN client not initialized")
+            return bidirectional_pb2.Data(value=0, payload="NDN client not initialized")
         
         client_config = self.config.get_client_config()
         interests = client_config.get('interests', [])
@@ -56,20 +49,16 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             interest_lifetime = client_config.get('interest_lifetime', 4000)
             disable_cache = self.config.get_client_disable_cache()
             
-            if _ndn_loop is not None and _ndn_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    _shared_ndn_client.express_interest_with_params(
+            if _ndn_lock is not None:
+                async with _ndn_lock:
+                    content = await _ndn_client.express_interest_with_params(
                         interest_name,
                         request_content,
                         lifetime=interest_lifetime,
                         must_be_fresh=disable_cache
-                    ),
-                    _ndn_loop
-                )
-                timeout = (interest_lifetime / 1000) + 60
-                content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+                    )
             else:
-                content = await _shared_ndn_client.express_interest_with_params(
+                content = await _ndn_client.express_interest_with_params(
                     interest_name,
                     request_content,
                     lifetime=interest_lifetime,
@@ -98,38 +87,52 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
 
 
 def create_server(port: Optional[int] = None, config_path: Optional[str] = None, 
-                  ndn_client: Optional[NDNClient] = None, enable_ndn: bool = False):
+                  enable_ndn: bool = False):
+    global _ndn_client
+    
     if port is None:
         config = get_config(config_path)
         port = config.get_grpc_server_port()
     
-    import time
-    max_wait = 5
-    wait_interval = 0.1
-    waited = 0
-    while _shared_ndn_client is None and waited < max_wait:
-        time.sleep(wait_interval)
-        waited += wait_interval
-    
-    if _shared_ndn_client is None:
-        logger.error("NDN client not set, cannot start gRPC server")
-        raise RuntimeError("NDN client must be set before starting gRPC server")
+    if enable_ndn and _ndn_client is None:
+        config = get_config(config_path)
+        pib_path = config.get_ndn_pib_path()
+        tpm_path = config.get_ndn_tpm_path()
+        _ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+        logger.info("NDN client initialized for gRPC server")
     
     server = grpc.aio.server()
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(
-        SimpleService(ndn_client=ndn_client, config_path=config_path), server
+        SimpleService(config_path=config_path), server
     )
     
     listen_addr = f'[::]:{port}'
     server.add_insecure_port(listen_addr)
     
     logger.info(f"gRPC server starting on port {port}")
-    logger.info("All gRPC requests will be routed through NDN")
+    if enable_ndn:
+        logger.info("All gRPC requests will be routed through NDN")
     return server
 
 
 async def run_server_async(port: Optional[int] = None, config_path: Optional[str] = None, enable_ndn: bool = False):
+    global _ndn_client, _ndn_lock
+    
     server = create_server(port, config_path, enable_ndn=enable_ndn)
+    
+    if enable_ndn and _ndn_client:
+        if _ndn_lock is None:
+            _ndn_lock = asyncio.Lock()
+            logger.info("NDN lock initialized in event loop")
+        
+        async def run_ndn_client():
+            await _ndn_client.app.run_forever()
+        
+        import asyncio
+        ndn_task = asyncio.create_task(run_ndn_client())
+        await asyncio.sleep(1.0)
+        logger.info("NDN client started in gRPC server event loop")
+    
     await server.start()
     logger.info("gRPC server started, waiting for connections...")
     
@@ -137,6 +140,8 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         await server.wait_for_termination()
     except KeyboardInterrupt:
         logger.info("Received stop signal, shutting down server...")
+        if _ndn_client:
+            _ndn_client.shutdown()
         await server.stop(grace=5)
         logger.info("Server closed")
 
