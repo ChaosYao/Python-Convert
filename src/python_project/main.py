@@ -108,7 +108,7 @@ def run_both_servers(config_path: Optional[str] = None):
     
     def start_grpc_server():
         try:
-            run_grpc_server(config_path=config_path, enable_ndn=True)
+            run_grpc_server(config_path=config_path)
         except Exception as e:
             logger.error(f"gRPC server error: {e}", exc_info=True)
     
