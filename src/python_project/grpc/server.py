@@ -1,6 +1,7 @@
 # gRPC simple server implementation
 import asyncio
 import logging
+import threading
 from typing import Optional
 
 import grpc
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 _ndn_client: Optional[NDNClient] = None
 _ndn_lock: Optional[asyncio.Lock] = None
 _ndn_connected: Optional[asyncio.Event] = None
+_ndn_loop = None
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
@@ -54,14 +56,18 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
                 logger.warning("NDN client not connected yet, waiting...")
                 await _ndn_connected.wait()
             
-            if _ndn_lock is not None:
-                async with _ndn_lock:
-                    content = await _ndn_client.express_interest_with_params(
+            if _ndn_loop is not None and _ndn_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    _ndn_client.express_interest_with_params(
                         interest_name,
                         request_content,
                         lifetime=interest_lifetime,
                         must_be_fresh=disable_cache
-                    )
+                    ),
+                    _ndn_loop
+                )
+                timeout = (interest_lifetime / 1000) + 60
+                content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
             else:
                 content = await _ndn_client.express_interest_with_params(
                     interest_name,
@@ -121,7 +127,7 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None,
 
 
 async def run_server_async(port: Optional[int] = None, config_path: Optional[str] = None, enable_ndn: bool = False):
-    global _ndn_client, _ndn_lock, _ndn_connected
+    global _ndn_client, _ndn_lock, _ndn_connected, _ndn_loop
     
     server = create_server(port, config_path, enable_ndn=enable_ndn)
     
@@ -133,17 +139,26 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         if _ndn_connected is None:
             _ndn_connected = asyncio.Event()
         
-        async def after_start():
+        def run_ndn_client():
+            global _ndn_loop
+            _ndn_client.app.run_forever(after_start=lambda: asyncio.create_task(_after_start()))
+        
+        async def _after_start():
             await asyncio.sleep(1.0)
+            loop = asyncio.get_event_loop()
+            _ndn_loop = loop
             _ndn_connected.set()
             logger.info("NDN client connected to NFD")
         
-        async def run_ndn_client():
-            await _ndn_client.app.run_forever(after_start=after_start())
+        ndn_thread = threading.Thread(target=run_ndn_client, daemon=True)
+        ndn_thread.start()
         
-        ndn_task = asyncio.create_task(run_ndn_client())
-        await _ndn_connected.wait()
-        logger.info("NDN client started and connected in gRPC server event loop")
+        try:
+            await asyncio.wait_for(_ndn_connected.wait(), timeout=5.0)
+            logger.info("NDN client started and connected in gRPC server event loop")
+        except asyncio.TimeoutError:
+            logger.warning("NDN client connection timeout, continuing anyway...")
+            _ndn_connected.set()
     
     await server.start()
     logger.info("gRPC server started, waiting for connections...")
