@@ -139,16 +139,16 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         if _ndn_connected is None:
             _ndn_connected = asyncio.Event()
         
-        def run_ndn_client():
-            global _ndn_loop
-            _ndn_client.app.run_forever(after_start=lambda: asyncio.create_task(_after_start()))
-        
         async def _after_start():
             await asyncio.sleep(1.0)
             loop = asyncio.get_event_loop()
+            global _ndn_loop
             _ndn_loop = loop
             _ndn_connected.set()
             logger.info("NDN client connected to NFD")
+        
+        def run_ndn_client():
+            _ndn_client.app.run_forever(after_start=_after_start())
         
         ndn_thread = threading.Thread(target=run_ndn_client, daemon=True)
         ndn_thread.start()
