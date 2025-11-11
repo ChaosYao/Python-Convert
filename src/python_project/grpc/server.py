@@ -2,6 +2,9 @@
 import asyncio
 import logging
 import threading
+from queue import Queue
+from dataclasses import dataclass
+from concurrent.futures import Future
 from typing import Optional
 
 import grpc
@@ -16,9 +19,17 @@ logger = logging.getLogger(__name__)
 
 
 _ndn_client: Optional[NDNClient] = None
-_ndn_lock: Optional[asyncio.Lock] = None
+_ndn_queue: Optional[Queue] = None
 _ndn_connected: Optional[asyncio.Event] = None
-_ndn_loop = None
+
+
+@dataclass
+class InterestRequest:
+    interest_name: str
+    app_param: bytes
+    lifetime: int
+    must_be_fresh: bool
+    future: Future
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
@@ -56,25 +67,26 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
                 logger.warning("NDN client not connected yet, waiting...")
                 await _ndn_connected.wait()
             
-            if _ndn_loop is not None and _ndn_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    _ndn_client.express_interest_with_params(
-                        interest_name,
-                        request_content,
-                        lifetime=interest_lifetime,
-                        must_be_fresh=disable_cache
-                    ),
-                    _ndn_loop
-                )
-                timeout = (interest_lifetime / 1000) + 60
-                content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
-            else:
-                content = await _ndn_client.express_interest_with_params(
-                    interest_name,
-                    request_content,
-                    lifetime=interest_lifetime,
-                    must_be_fresh=disable_cache
-                )
+            if _ndn_queue is None:
+                logger.error("NDN queue not initialized")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("NDN queue not initialized")
+                return bidirectional_pb2.Data(value=0, payload="NDN queue not initialized")
+            
+            future = Future()
+            request = InterestRequest(
+                interest_name=interest_name,
+                app_param=request_content,
+                lifetime=interest_lifetime,
+                must_be_fresh=disable_cache,
+                future=future
+            )
+            
+            _ndn_queue.put(request)
+            logger.info(f"Interest request added to queue: {interest_name}")
+            
+            timeout = (interest_lifetime / 1000) + 60
+            content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
             
             if content:
                 response = data_content_to_grpc_data(content)
@@ -127,25 +139,43 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None,
 
 
 async def run_server_async(port: Optional[int] = None, config_path: Optional[str] = None, enable_ndn: bool = False):
-    global _ndn_client, _ndn_lock, _ndn_connected, _ndn_loop
+    global _ndn_client, _ndn_queue, _ndn_connected
     
     server = create_server(port, config_path, enable_ndn=enable_ndn)
     
     if enable_ndn and _ndn_client:
-        if _ndn_lock is None:
-            _ndn_lock = asyncio.Lock()
-            logger.info("NDN lock initialized in event loop")
+        if _ndn_queue is None:
+            _ndn_queue = Queue()
         
         if _ndn_connected is None:
             _ndn_connected = asyncio.Event()
         
-        async def _after_start():
+        async def consume_interest_queue():
             await asyncio.sleep(1.0)
-            loop = asyncio.get_event_loop()
-            global _ndn_loop
-            _ndn_loop = loop
             _ndn_connected.set()
-            logger.info("NDN client connected to NFD")
+            logger.info("NDN client connected to NFD, starting interest queue consumer")
+            
+            while True:
+                try:
+                    request = await asyncio.to_thread(_ndn_queue.get)
+                    logger.info(f"Processing interest from queue: {request.interest_name}")
+                    
+                    try:
+                        content = await _ndn_client.express_interest_with_params(
+                            request.interest_name,
+                            request.app_param,
+                            lifetime=request.lifetime,
+                            must_be_fresh=request.must_be_fresh
+                        )
+                        request.future.set_result(content)
+                    except Exception as e:
+                        logger.error(f"Error processing interest: {e}", exc_info=True)
+                        request.future.set_exception(e)
+                except Exception as e:
+                    logger.error(f"Error in interest queue consumer: {e}", exc_info=True)
+        
+        async def _after_start():
+            asyncio.create_task(consume_interest_queue())
         
         def run_ndn_client():
             _ndn_client.app.run_forever(after_start=_after_start())
