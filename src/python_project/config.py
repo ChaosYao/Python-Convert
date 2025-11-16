@@ -167,6 +167,17 @@ class Config:
         if test_data:
             return [(item[0], item[1]) for item in test_data if len(item) >= 2]
         return [(1, "test1"), (2, "test2"), (3, "test3"), (4, "test4")]
+    
+    def get_grpc_server_use_ndn(self) -> bool:
+        """Get whether gRPC server should use NDN client."""
+        value = self.get('grpc.server.use_ndn')
+        if value is None:
+            return True  # Default to True for backward compatibility
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
 
 
 # Global config instance

@@ -53,6 +53,10 @@ grpc:
   server:
     # Server listening port
     port: 50051
+    # Whether to use NDN client for request processing
+    # If true, requests will be routed through NDN
+    # If false, requests will be processed by gRPC server directly
+    use_ndn: true
   
   # Client configuration
   client:

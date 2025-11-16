@@ -40,6 +40,20 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
                       context: grpc.ServicerContext) -> bidirectional_pb2.Data:
         logger.info(f"Received gRPC request: value={request.value}, payload={request.payload}")
         
+        # Check if NDN client should be used
+        use_ndn = self.config.get_grpc_server_use_ndn()
+        
+        if not use_ndn:
+            # Default gRPC server logic: echo back the request with modified value
+            logger.info("Processing request with default gRPC logic (NDN disabled)")
+            response = bidirectional_pb2.Data(
+                value=request.value + 1,
+                payload=f"Echo: {request.payload}"
+            )
+            logger.info(f"Returning gRPC response: value={response.value}, payload={response.payload}")
+            return response
+        
+        # NDN client logic
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -112,13 +126,16 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
 def create_server(port: Optional[int] = None, config_path: Optional[str] = None):
     global _ndn_queue
     
+    config = get_config(config_path)
     if port is None:
-        config = get_config(config_path)
         port = config.get_grpc_server_port()
     
-    if _ndn_queue is None:
-        _ndn_queue = Queue()
-        logger.info("NDN interest queue created")
+    use_ndn = config.get_grpc_server_use_ndn()
+    
+    if use_ndn:
+        if _ndn_queue is None:
+            _ndn_queue = Queue()
+            logger.info("NDN interest queue created")
     
     server = grpc.aio.server()
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(
@@ -129,7 +146,10 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
     server.add_insecure_port(listen_addr)
     
     logger.info(f"gRPC server starting on port {port}")
-    logger.info("All gRPC requests will be routed through NDN")
+    if use_ndn:
+        logger.info("All gRPC requests will be routed through NDN")
+    else:
+        logger.info("gRPC server running in default mode (NDN disabled)")
     return server
 
 
@@ -138,59 +158,65 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
     
     server = create_server(port, config_path)
     
-    if _ndn_queue is None:
-        logger.error("NDN queue not initialized")
-        raise RuntimeError("NDN queue not initialized")
-    
-    if _ndn_connected is None:
-        _ndn_connected = asyncio.Event()
-    
     config = get_config(config_path)
-    pib_path = config.get_ndn_pib_path()
-    tpm_path = config.get_ndn_tpm_path()
+    use_ndn = config.get_grpc_server_use_ndn()
     
-    async def consume_interest_queue():
-        await asyncio.sleep(1.0)
-        _ndn_connected.set()
-        logger.info("NDN client connected to NFD, starting interest queue consumer")
+    # Only initialize NDN client if use_ndn is True
+    if use_ndn:
+        if _ndn_queue is None:
+            logger.error("NDN queue not initialized")
+            raise RuntimeError("NDN queue not initialized")
         
-        while True:
-            try:
-                request = await asyncio.to_thread(_ndn_queue.get)
-                logger.info(f"Processing interest from queue: {request.interest_name}")
-                
+        if _ndn_connected is None:
+            _ndn_connected = asyncio.Event()
+        
+        pib_path = config.get_ndn_pib_path()
+        tpm_path = config.get_ndn_tpm_path()
+        
+        async def consume_interest_queue():
+            await asyncio.sleep(1.0)
+            _ndn_connected.set()
+            logger.info("NDN client connected to NFD, starting interest queue consumer")
+            
+            while True:
                 try:
-                    content = await _ndn_client.express_interest_with_params(
-                        request.interest_name,
-                        request.app_param,
-                        lifetime=request.lifetime,
-                        must_be_fresh=request.must_be_fresh
-                    )
-                    request.future.set_result(content)
+                    request = await asyncio.to_thread(_ndn_queue.get)
+                    logger.info(f"Processing interest from queue: {request.interest_name}")
+                    
+                    try:
+                        content = await _ndn_client.express_interest_with_params(
+                            request.interest_name,
+                            request.app_param,
+                            lifetime=request.lifetime,
+                            must_be_fresh=request.must_be_fresh
+                        )
+                        request.future.set_result(content)
+                    except Exception as e:
+                        logger.error(f"Error processing interest: {e}", exc_info=True)
+                        request.future.set_exception(e)
                 except Exception as e:
-                    logger.error(f"Error processing interest: {e}", exc_info=True)
-                    request.future.set_exception(e)
-            except Exception as e:
-                logger.error(f"Error in interest queue consumer: {e}", exc_info=True)
-    
-    async def _after_start():
-        asyncio.create_task(consume_interest_queue())
-    
-    def run_ndn_client():
-        global _ndn_client
-        _ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
-        logger.info("NDN client initialized in NDN thread")
-        _ndn_client.app.run_forever(after_start=_after_start())
-    
-    ndn_thread = threading.Thread(target=run_ndn_client, daemon=True)
-    ndn_thread.start()
-    
-    try:
-        await asyncio.wait_for(_ndn_connected.wait(), timeout=5.0)
-        logger.info("NDN client started and connected in gRPC server event loop")
-    except asyncio.TimeoutError:
-        logger.warning("NDN client connection timeout, continuing anyway...")
-        _ndn_connected.set()
+                    logger.error(f"Error in interest queue consumer: {e}", exc_info=True)
+        
+        async def _after_start():
+            asyncio.create_task(consume_interest_queue())
+        
+        def run_ndn_client():
+            global _ndn_client
+            _ndn_client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
+            logger.info("NDN client initialized in NDN thread")
+            _ndn_client.app.run_forever(after_start=_after_start())
+        
+        ndn_thread = threading.Thread(target=run_ndn_client, daemon=True)
+        ndn_thread.start()
+        
+        try:
+            await asyncio.wait_for(_ndn_connected.wait(), timeout=5.0)
+            logger.info("NDN client started and connected in gRPC server event loop")
+        except asyncio.TimeoutError:
+            logger.warning("NDN client connection timeout, continuing anyway...")
+            _ndn_connected.set()
+    else:
+        logger.info("NDN client disabled, skipping NDN initialization")
     
     await server.start()
     logger.info("gRPC server started, waiting for connections...")
