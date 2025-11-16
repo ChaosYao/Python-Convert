@@ -189,6 +189,13 @@ class Config:
         if isinstance(value, str):
             return value.lower() in ('true', '1', 'yes', 'on')
         return bool(value)
+    
+    def get_ndn_server_grpc_bridge_prefixes(self) -> list[str]:
+        """Get list of prefixes that should be forwarded to gRPC server."""
+        prefixes = self.get('grpc.bridge_prefixes', [])
+        if not isinstance(prefixes, list):
+            return []
+        return [str(p) for p in prefixes if p]
 
 
 # Global config instance
