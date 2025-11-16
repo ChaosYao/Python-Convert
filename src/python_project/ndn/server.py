@@ -127,7 +127,7 @@ class NDNServer:
             self.app.put_data(name, content=content, freshness_period=10000)
         
         if use_grpc_bridge and self.grpc_client:
-            # Use gRPC bridge handler - all prefixes go through gRPC
+            # Use gRPC bridge handler with prefix filtering
             bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
             @self.app.route(prefix)
             def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
@@ -135,26 +135,18 @@ class NDNServer:
                 # Check if prefix is in configured bridge prefixes
                 in_bridge_prefixes = not bridge_prefixes or any(name_str.startswith(bp) for bp in bridge_prefixes)
                 
-                if in_bridge_prefixes:
-                    logger.info(f"Processing Interest with gRPC bridge (in bridge_prefixes): {name_str}")
-                    try:
-                        content = self._grpc_bridge_handler(name, param, app_param)
-                    except Exception as e:
-                        logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
-                        content = f"Error: {e}".encode()
-                else:
-                    # Not in bridge_prefixes, directly use Interest name without translation
-                    logger.info(f"Processing Interest with gRPC bridge (not in bridge_prefixes, no translation): {name_str}")
-                    try:
-                        from ..grpc import bidirectional_pb2
-                        grpc_request = bidirectional_pb2.Data(value=0, payload=name_str)
-                        logger.info(f"gRPC bridge: Direct request without translation, payload: {name_str}")
-                        grpc_response = self.grpc_client.process_data(grpc_request.value, grpc_request.payload)
-                        logger.info(f"gRPC bridge: Received gRPC response: value={grpc_response.value}, payload={grpc_response.payload}")
-                        content = grpc_data_to_data_content(grpc_response)
-                    except Exception as e:
-                        logger.error(f"gRPC bridge error: {e}", exc_info=True)
-                        content = f"Error: {e}".encode()
+                if not in_bridge_prefixes:
+                    # Not in bridge_prefixes, use default handler
+                    default_handler(name, param, app_param)
+                    return
+                
+                # In bridge_prefixes, translate to gRPC request
+                logger.info(f"Processing Interest with gRPC bridge: {name_str}")
+                try:
+                    content = self._grpc_bridge_handler(name, param, app_param)
+                except Exception as e:
+                    logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
+                    content = f"Error: {e}".encode()
                 
                 logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
                 freshness_period = self.config.get_server_config().get('freshness_period', 10000)
