@@ -178,6 +178,17 @@ class Config:
         if isinstance(value, str):
             return value.lower() in ('true', '1', 'yes', 'on')
         return bool(value)
+    
+    def get_ndn_server_use_grpc(self) -> bool:
+        """Get whether NDN server should use gRPC client for bridge."""
+        value = self.get('grpc.bridge_enabled')
+        if value is None:
+            return False  # Default to False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
 
 
 # Global config instance

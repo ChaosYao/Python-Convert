@@ -68,5 +68,7 @@ grpc:
     - [1, "test1"]
   
   # Bridge configuration
+  # If true, NDN server will forward Interest requests to gRPC server
+  # Interest app_param will be converted to gRPC request, and gRPC response will be converted to Data packet
   bridge_enabled: false  # enable ndn-to-grpc bridge in NDN server
 

@@ -46,7 +46,7 @@ def run_server(config_path: Optional[str] = None):
     # Get PIB and TPM paths from config
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
-    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
+    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
     server_config = config.get_server_config()
     routes = server_config.get('routes', [])
@@ -101,7 +101,7 @@ def run_both_servers(config_path: Optional[str] = None):
     
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
-    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
+    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
     grpc_config = config.get_grpc_config()
     bridge_enabled = grpc_config.get('bridge_enabled', False)
