@@ -1,9 +1,10 @@
-# NDN/gRPC Conversion Project Configuration
+# NDN/gRPC Conversion Project Configuration (Sidecar Mode)
 # Copy this file to config.yaml and modify as needed
 
-# Running mode: 'server' or 'client'
+# Running mode: 'server' or 'sidecar'
 # Can be overridden by command line argument or MODE environment variable
-mode: server
+# Default: 'sidecar' (both gRPC Server and NDN Server)
+mode: sidecar
 
 # Logging configuration
 logging:
@@ -34,7 +35,7 @@ server:
   # Freshness period for Data packets (in milliseconds)
   freshness_period: 10000
 
-# Client-specific configuration
+# Client-specific configuration (for gRPC Server to NDN conversion)
 client:
   # Interest lifetime (in milliseconds)
   interest_lifetime: 4000
@@ -43,7 +44,8 @@ client:
   # If true, Interest will require fresh data and bypass cache
   disable_cache: true
   
-  # Interests to send (for demo purposes)
+  # Interest name to use when converting gRPC requests to NDN Interests
+  # This is used by gRPC Server when forwarding requests to NDN
   interests:
     - /yao/test/demo/B
 

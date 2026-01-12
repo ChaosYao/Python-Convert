@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: python-convert:latest
+    container_name: ndn-grpc-sidecar
+    ports:
+      - "50051:50051"
+    environment:
+      - MODE=sidecar
+      - GRPC_SERVER_PORT=50051
+      - LOG_LEVEL=INFO
+      - NDN_PIB_PATH=/home/appuser/.ndn/pib.db
+      - NDN_TPM_PATH=/home/appuser/.ndn/ndnsec-key-file
+      # Main container address (if needed for bridge)
+      - GRPC_CLIENT_HOST=localhost:8080
+    volumes:
+      # Mount config file (optional, can use environment variables)
+      - ./config.yaml:/app/config.yaml:ro
+      # Mount NDN data directory (persistent storage)
+      - ndn-data:/home/appuser/.ndn
+    networks:
+      - ndn-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.settimeout(5); result = s.connect_ex(('localhost', 50051)); s.close(); exit(0 if result == 0 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  ndn-data:
+    driver: local
+
+networks:
+  ndn-network:
+    driver: bridge
+

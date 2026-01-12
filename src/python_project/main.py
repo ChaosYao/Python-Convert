@@ -1,9 +1,13 @@
 """
-Main entry point for NDN/gRPC conversion project.
+Main entry point for NDN/gRPC conversion project (Sidecar mode).
 
-Supports running in server or client mode via:
-1. Command line argument: python -m python_project server|client
-2. Environment variable: MODE=server|client
+Supports running in:
+- sidecar mode: both gRPC Server and NDN Server (default)
+- server mode: NDN Server only
+
+Configuration via:
+1. Command line argument: python -m python_project [server|sidecar]
+2. Environment variable: MODE=server|sidecar
 3. Configuration file: config.yaml
 """
 import asyncio
@@ -13,7 +17,6 @@ import logging
 import threading
 from typing import Optional
 
-from .ndn.client import NDNClient
 from .ndn.server import NDNServer
 from .utils import setup_logging
 from .config import get_config
@@ -22,21 +25,23 @@ logger = logging.getLogger(__name__)
 
 
 def get_mode(config_path: Optional[str] = None) -> Optional[str]:
+    """Get running mode. Returns 'sidecar' by default."""
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
-        if mode in ['server', 'client', 'both']:
+        if mode in ['server', 'sidecar']:
             return mode
     
     mode = os.getenv('MODE', '').lower()
-    if mode in ['server', 'client', 'both']:
+    if mode in ['server', 'sidecar']:
         return mode
     
     config = get_config(config_path)
     mode = config.get_mode()
-    if mode and mode.lower() in ['server', 'client', 'both']:
+    if mode and mode.lower() in ['server', 'sidecar']:
         return mode.lower()
     
-    return None
+    # Default to sidecar mode
+    return 'sidecar'
 
 
 def run_server(config_path: Optional[str] = None):
@@ -94,30 +99,26 @@ def run_server(config_path: Optional[str] = None):
         server.shutdown()
 
 
-def run_both_servers(config_path: Optional[str] = None):
+def run_sidecar(config_path: Optional[str] = None):
+    """
+    Run sidecar mode: both gRPC Server and NDN Server running concurrently.
+    
+    Thread safety:
+    - NDN Server runs in its own thread with its own NDNApp instance
+    - NDN Client (for gRPC Server) runs in its own thread with its own NDNApp instance
+    - gRPC Server runs in async event loop
+    """
     config = get_config(config_path)
     
-    from .grpc.server import run_server as run_grpc_server
+    from .grpc.server import run_server_async
     
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
-    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
-    grpc_config = config.get_grpc_config()
-    bridge_enabled = grpc_config.get('bridge_enabled', False)
+    # Initialize NDN Server
+    ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
-    def start_grpc_server():
-        try:
-            run_grpc_server(config_path=config_path)
-        except Exception as e:
-            logger.error(f"gRPC server error: {e}", exc_info=True)
-    
-    grpc_thread = threading.Thread(target=start_grpc_server, daemon=True)
-    grpc_thread.start()
-    
-    logger.info("gRPC server started in background thread")
-    logger.info("=" * 50)
-    
+    # Configure NDN Server routes and data
     server_config = config.get_server_config()
     routes = server_config.get('routes', [])
     data = server_config.get('data', {})
@@ -129,7 +130,7 @@ def run_both_servers(config_path: Optional[str] = None):
         logger.warning("No routes configured in config file!")
     else:
         for route in routes:
-            server.register_route(route)
+            ndn_server.register_route(route)
     
     if not data:
         logger.warning("No data configured in config file!")
@@ -137,84 +138,45 @@ def run_both_servers(config_path: Optional[str] = None):
         for name, content in data.items():
             if isinstance(content, str):
                 content = content.encode()
-            server.store_data(name, content)
+            ndn_server.store_data(name, content)
+    
+    # Start NDN Server in its own thread (thread-safe)
+    def run_ndn_server_thread():
+        """Run NDN Server in dedicated thread."""
+        try:
+            logger.info("NDN Server thread started")
+            ndn_server.app.run_forever()
+        except Exception as e:
+            logger.error(f"NDN Server error: {e}", exc_info=True)
+        finally:
+            ndn_server.shutdown()
+    
+    ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
+    ndn_server_thread.start()
     
     logger.info("=" * 50)
-    logger.info("Both servers started")
-    logger.info(f"gRPC server: port {config.get_grpc_server_port()}")
+    logger.info("Sidecar mode started")
+    logger.info(f"gRPC Server: port {config.get_grpc_server_port()}")
     if routes:
-        logger.info(f"NDN server: listening on prefixes {', '.join(routes)}")
+        logger.info(f"NDN Server: listening on prefixes {', '.join(routes)}")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
+    # Run gRPC Server in async event loop (main thread)
     try:
-        server.app.run_forever()
+        asyncio.run(run_server_async(port=None, config_path=config_path))
     except KeyboardInterrupt:
-        logger.info("Shutting down servers...")
-        server.shutdown()
-        logger.info("Servers stopped")
+        logger.info("Shutting down sidecar...")
+        ndn_server.shutdown()
+        logger.info("Sidecar stopped")
 
 
-def run_client(config_path: Optional[str] = None):
-    """Run NDN client that sends Interests."""
-    config = get_config(config_path)
-    
-    # Get PIB and TPM paths from config
-    pib_path = config.get_ndn_pib_path()
-    tpm_path = config.get_ndn_tpm_path()
-    client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
-    
-    # Get client configuration
-    client_config = config.get_client_config()
-    interests = client_config.get('interests', [])
-    interest_lifetime = client_config.get('interest_lifetime', 4000)
-    
-    # Log configuration for debugging
-    logger.info(f"Client config loaded: {client_config}")
-    
-    # Warn if no interests configured
-    if not interests:
-        logger.warning("No interests configured in config file! Client will not send any Interests.")
-        logger.warning("Please configure 'client.interests' in config.yaml")
-        logger.info("Example: client.interests: ['/yao/test/demo/B']")
-    else:
-        logger.info(f"Will send {len(interests)} interests: {interests}")
-    
-    async def client_main():
-        """Main client logic."""
-        # Wait a bit for server to be ready
-        await asyncio.sleep(2)
-        
-        logger.info("=" * 50)
-        logger.info("NDN Client started")
-        
-        if not interests:
-            logger.warning("No interests to send. Exiting.")
-            client.shutdown()
-            return
-        
-        logger.info("Sending Interest packets...")
-        logger.info("=" * 50)
-        
-        # Send Interests from configuration
-        for interest_name in interests:
-            content = await client.express_interest(
-                interest_name,
-                lifetime=interest_lifetime
-            )
-            if content:
-                logger.info(f"Received content: {content.decode()}")
-            await asyncio.sleep(1)
-        
-        logger.info("Demo completed")
-        client.shutdown()
-    
-    try:
-        # NDNApp.run_forever() handles event loop internally, so we call it directly
-        client.app.run_forever(after_start=client_main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down client...")
-        client.shutdown()
+def run_both_servers(config_path: Optional[str] = None):
+    """Legacy function, redirects to run_sidecar."""
+    logger.warning("run_both_servers is deprecated, using run_sidecar instead")
+    run_sidecar(config_path)
+
+
 
 
 def main():
@@ -248,31 +210,28 @@ def main():
             logger.info("Server stopped by user")
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
-    elif mode == 'both':
+    elif mode == 'sidecar':
         try:
-            run_both_servers(config_path)
+            run_sidecar(config_path)
         except KeyboardInterrupt:
-            logger.info("Servers stopped by user")
-        except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
-    elif mode == 'client':
-        try:
-            run_client(config_path)
-        except KeyboardInterrupt:
-            logger.info("Client stopped by user")
+            logger.info("Sidecar stopped by user")
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
     else:
         logger.info("Usage:")
-        logger.info("  Command line: python -m python_project [server|client|both] [--config=path/to/config.yaml]")
-        logger.info("  Environment:  MODE=server|client|both python -m python_project")
+        logger.info("  Command line: python -m python_project [server|sidecar] [--config=path/to/config.yaml]")
+        logger.info("  Environment:  MODE=server|sidecar python -m python_project")
         logger.info("  Config file: Create config.yaml (see config.yaml.example)")
+        logger.info("")
+        logger.info("Modes:")
+        logger.info("  server  - Run NDN server only")
+        logger.info("  sidecar - Run both gRPC server and NDN server (default)")
         logger.info("")
         logger.info("Configuration Priority:")
         logger.info("  1. Command line arguments")
         logger.info("  2. Environment variables")
         logger.info("  3. Configuration file (config.yaml)")
-        logger.info("  4. Default values")
+        logger.info("  4. Default values (sidecar mode)")
         logger.info("")
         logger.info("Configuration File:")
         logger.info("  - Copy config.yaml.example to config.yaml")
@@ -280,16 +239,16 @@ def main():
         logger.info("  - Or use --config=/path/to/config.yaml to specify custom location")
         logger.info("")
         logger.info("Environment Variables:")
-        logger.info("  MODE: server|client")
+        logger.info("  MODE: server|sidecar")
         logger.info("  NDN_PIB_PATH: Path to PIB database")
         logger.info("  NDN_TPM_PATH: Path to TPM directory")
         logger.info("  LOG_LEVEL: DEBUG|INFO|WARNING|ERROR|CRITICAL")
         logger.info("")
         logger.info("Examples:")
-        logger.info("  python -m python_project server      # Start NDN server only")
-        logger.info("  python -m python_project both       # Start both NDN and gRPC servers")
-        logger.info("  python -m python_project client    # Start NDN client")
-        logger.info("  MODE=both python -m python_project   # Start both servers")
+        logger.info("  python -m python_project           # Start sidecar mode (default)")
+        logger.info("  python -m python_project server    # Start NDN server only")
+        logger.info("  python -m python_project sidecar   # Start sidecar mode")
+        logger.info("  MODE=sidecar python -m python_project   # Start sidecar mode")
         sys.exit(1)
 
 

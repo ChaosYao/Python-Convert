@@ -44,16 +44,13 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         use_ndn = self.config.get_grpc_server_use_ndn()
         
         if not use_ndn:
-            # Default gRPC server logic: echo back the request with modified value
-            logger.info("Processing request with default gRPC logic (NDN disabled)")
-            response = bidirectional_pb2.Data(
-                value=request.value + 1,
-                payload=f"Echo: {request.payload}"
-            )
-            logger.info(f"Returning gRPC response: value={response.value}, payload={response.payload}")
-            return response
+            # If NDN is disabled, return error (requests should be filtered by sidecar)
+            logger.warning("NDN is disabled, but request reached here. This should not happen in sidecar mode.")
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details("NDN processing is disabled")
+            return bidirectional_pb2.Data(value=0, payload="NDN processing disabled")
         
-        # NDN client logic
+        # Convert to NDN Interest
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
             context.set_code(grpc.StatusCode.INTERNAL)
