@@ -154,13 +154,68 @@ class Config:
         port = self.get('grpc.server.port') or os.getenv('GRPC_SERVER_PORT')
         if port:
             return int(port)
-        return 50051
+        return 19090  # Default gRPC server port
     
     def get_grpc_client_host(self) -> str:
-        host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
-        if host:
-            return host
-        return "localhost:50051"
+        """
+        Get gRPC client host address.
+        In sidecar mode, always use localhost to connect to the local gRPC server.
+        """
+        # In sidecar mode, always use localhost
+        port = self.get_grpc_server_port()
+        return f"localhost:{port}"
+    
+    def get_grpc_forward_target(self) -> Optional[str]:
+        """
+        Get target gRPC server address for direct forwarding (without NDN conversion).
+        If configured, requests will be forwarded directly to this server.
+        Returns None if not configured (will use NDN conversion or return error).
+        """
+        target = self.get('grpc.server.forward_target') or os.getenv('GRPC_FORWARD_TARGET')
+        if target:
+            return target
+        return None
+    
+    def get_grpc_forward_methods(self) -> list[str]:
+        """
+        Get list of RPC method names that should be forwarded (not converted to NDN).
+        If empty, all methods (except those explicitly configured for NDN) will be forwarded.
+        """
+        methods = self.get('grpc.server.forward_methods', [])
+        if not isinstance(methods, list):
+            return []
+        return [str(m) for m in methods if m]
+    
+    def should_forward_method(self, method_name: str) -> bool:
+        """
+        Determine if a method should be forwarded based on configuration.
+        
+        Rules:
+        1. If forward_methods is configured and method is in the list -> forward
+        2. If forward_methods is empty and forward_target is configured -> forward (default)
+        3. Otherwise -> convert to NDN (if use_ndn is True)
+        """
+        forward_methods = self.get_grpc_forward_methods()
+        forward_target = self.get_grpc_forward_target()
+        
+        # If forward_methods is explicitly configured
+        if forward_methods:
+            return method_name in forward_methods
+        
+        # If forward_target is configured but forward_methods is empty, forward all (except PullLogEntries if use_ndn)
+        if forward_target:
+            # If use_ndn is True, only forward non-PullLogEntries methods
+            # If use_ndn is False, forward all
+            use_ndn = self.get_grpc_server_use_ndn()
+            if use_ndn:
+                # Only forward methods that are not PullLogEntries
+                return method_name != 'PullLogEntries'
+            else:
+                # Forward all methods
+                return True
+        
+        # Default: don't forward (convert to NDN or return error)
+        return False
     
     def get_grpc_test_data(self) -> list[tuple[int, str]]:
         test_data = self.get('grpc.test_data', [])

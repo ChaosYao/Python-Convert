@@ -18,7 +18,7 @@ import threading
 from typing import Optional
 
 from .ndn.server import NDNServer
-from .utils import setup_logging
+from .utils import setup_logging, get_hostname, extract_host_from_server_id
 from .config import get_config
 
 logger = logging.getLogger(__name__)
@@ -53,41 +53,19 @@ def run_server(config_path: Optional[str] = None):
     tpm_path = config.get_ndn_tpm_path()
     server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
-    server_config = config.get_server_config()
-    routes = server_config.get('routes', [])
-    data = server_config.get('data', {})
+    # Get hostname and extract host part (first part before '.')
+    hostname = get_hostname()
+    host = extract_host_from_server_id(hostname)
+    logger.info(f"Current hostname: {hostname}, extracted host: {host}")
     
-    # Log configuration for debugging
-    logger.info(f"Server config loaded: {server_config}")
-    logger.info(f"Routes to register: {routes}")
-    logger.info(f"Data to store: {list(data.keys())}")
-    
-    # Warn if no routes configured
-    if not routes:
-        logger.warning("No routes configured in config file! Server will not respond to any Interests.")
-        logger.warning("Please configure 'server.routes' in config.yaml")
-    else:
-        # Register routes
-        for route in routes:
-            server.register_route(route)
-    
-    # Warn if no data configured
-    if not data:
-        logger.warning("No data configured in config file!")
-        logger.warning("Please configure 'server.data' in config.yaml")
-    else:
-        # Store data
-        for name, content in data.items():
-            if isinstance(content, str):
-                content = content.encode()
-            server.store_data(name, content)
+    # Build route prefix based on hostname: /raft/{host}/
+    route_prefix = f"/raft/{host}"
+    logger.info(f"Registering route prefix: {route_prefix}")
+    server.register_route(route_prefix)
     
     logger.info("=" * 50)
     logger.info("NDN Server started")
-    if routes:
-        logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
-    else:
-        logger.info("No routes registered - server will not respond to Interests")
+    logger.info(f"Listening for Interests on prefix: {route_prefix}")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -118,27 +96,15 @@ def run_sidecar(config_path: Optional[str] = None):
     # Initialize NDN Server
     ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
     
-    # Configure NDN Server routes and data
-    server_config = config.get_server_config()
-    routes = server_config.get('routes', [])
-    data = server_config.get('data', {})
+    # Get hostname and extract host part (first part before '.')
+    hostname = get_hostname()
+    host = extract_host_from_server_id(hostname)
+    logger.info(f"Current hostname: {hostname}, extracted host: {host}")
     
-    logger.info(f"Routes to register: {routes}")
-    logger.info(f"Data to store: {list(data.keys())}")
-    
-    if not routes:
-        logger.warning("No routes configured in config file!")
-    else:
-        for route in routes:
-            ndn_server.register_route(route)
-    
-    if not data:
-        logger.warning("No data configured in config file!")
-    else:
-        for name, content in data.items():
-            if isinstance(content, str):
-                content = content.encode()
-            ndn_server.store_data(name, content)
+    # Build route prefix based on hostname: /raft/{host}/
+    route_prefix = f"/raft/{host}"
+    logger.info(f"Registering route prefix: {route_prefix}")
+    ndn_server.register_route(route_prefix)
     
     # Start NDN Server in its own thread (thread-safe)
     def run_ndn_server_thread():
@@ -157,8 +123,7 @@ def run_sidecar(config_path: Optional[str] = None):
     logger.info("=" * 50)
     logger.info("Sidecar mode started")
     logger.info(f"gRPC Server: port {config.get_grpc_server_port()}")
-    if routes:
-        logger.info(f"NDN Server: listening on prefixes {', '.join(routes)}")
+    logger.info(f"NDN Server: listening on prefix {route_prefix}")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     

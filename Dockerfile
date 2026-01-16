@@ -31,8 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app /home/appuser/.ndn && \
-    chown -R appuser:appuser /app /home/appuser/.ndn
+    mkdir -p /app /root/.ndn && \
+    chown -R appuser:appuser /app && \
+    chown -R root:root /root/.ndn
 
 # Copy Python dependencies from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -49,21 +50,22 @@ RUN pip install --no-cache-dir -e .
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    NDN_PIB_PATH=/home/appuser/.ndn/pib.db \
-    NDN_TPM_PATH=/home/appuser/.ndn/ndnsec-key-file \
+    NDN_PIB_PATH=/root/.ndn/pib.db \
+    NDN_TPM_PATH=/root/.ndn/ndnsec-key-file \
     MODE=sidecar \
-    GRPC_SERVER_PORT=50051 \
+    GRPC_SERVER_PORT=19090 \
     LOG_LEVEL=INFO
 
-# Expose gRPC server port
-EXPOSE 50051
+# Expose ports
+EXPOSE 19090  
+EXPOSE 6363   
 
 # Switch to non-root user
 USER appuser
 
 # Health check (simple port check)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import socket; s = socket.socket(); s.settimeout(5); result = s.connect_ex(('localhost', 50051)); s.close(); exit(0 if result == 0 else 1)" || exit 1
+    CMD python -c "import socket; s = socket.socket(); s.settimeout(5); result = s.connect_ex(('localhost', 19090)); s.close(); exit(0 if result == 0 else 1)" || exit 1
 
 # Default command: run sidecar mode
 CMD ["python", "-m", "python_project", "sidecar"]

@@ -25,12 +25,9 @@ ndn:
 # Server-specific configuration
 server:
   # Routes to register (list of prefixes)
+  # NDN server will forward Interest requests to gRPC server via bridge
   routes:
     - /yao/test/demo/B
-  
-  # Data to store (name -> content mapping)
-  data:
-    /yao/test/demo/B: '{"value": 0, "payload": "Hello from NDN Server!"}'
   
   # Freshness period for Data packets (in milliseconds)
   freshness_period: 10000
@@ -53,8 +50,8 @@ client:
 grpc:
   # Server configuration
   server:
-    # Server listening port
-    port: 50051
+    # Server listening port (default: 19090)
+    port: 19090
     # Whether to use NDN client for request processing
     # If true, requests will be routed through NDN
     # If false, requests will be processed by gRPC server directly
@@ -63,8 +60,7 @@ grpc:
   # Client configuration
   client:
     # Server address (host:port)
-    host: localhost:50051
-  
+    host: localhost:8181  
   # Test data for client demo (value, payload)
   test_data:
     - [1, "test1"]

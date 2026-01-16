@@ -2,15 +2,68 @@ syntax = "proto3";
 
 package grpc;
 
-// Simple message for gRPC demo
-message Data {
-    int32 value = 1;        // Data value
-    string payload = 2;     // Data payload
+// Entry type enumeration
+enum EntryType {
+    ENTRY_TYPE_UNKNOWN = 0;
+    ENTRY_TYPE_NO_OP = 1;
+    ENTRY_TYPE_DATA = 2;
+    ENTRY_TYPE_CONFIGURATION = 3;
 }
 
-// Simple gRPC service definition
+// Error type enumeration
+enum ErrorType {
+    ERROR_TYPE_NONE = 0;
+    ERROR_TYPE_LOG = 1;
+    ERROR_TYPE_STABLE = 2;
+    ERROR_TYPE_SNAPSHOT = 3;
+    ERROR_TYPE_STATE_MACHINE = 4;
+    ERROR_TYPE_META = 5;
+}
+
+// Entry metadata
+message EntryMeta {
+    int64 term = 1;
+    EntryType type = 2;
+    repeated string peers = 3;
+    int64 data_len = 4;
+    // Don't change field id of `old_peers' in the consideration of backward compatibility
+    repeated string old_peers = 5;
+    // Checksum for this log entry, since 1.2.6
+    int64 checksum = 6;
+    repeated string learners = 7;
+    repeated string old_learners = 8;
+}
+
+// Error response
+message ErrorResponse {
+    int32 errorCode = 1;
+    string errorMsg = 2;
+}
+
+// Pull log entry request
+message PullLogEntryRequest {
+    string group_id = 1;
+    string server_id = 2;
+    string peer_id = 3;
+    int64 term = 4;
+    int64 prev_log_term = 5;
+    int64 prev_log_index = 6;
+}
+
+// Pull log entry response
+message PullLogEntryResponse {
+    int64 term = 1;
+    bool success = 2;
+    int64 last_log_index = 3;
+    repeated EntryMeta entries = 4;
+    int64 committed_index = 5;
+    bytes data = 6;
+    ErrorResponse errorResponse = 99;
+}
+
+// gRPC service definition
 service SimpleService {
-    // Simple RPC: request and response
-    rpc Process(Data) returns (Data);
+    // Pull log entries RPC
+    rpc PullLogEntries(PullLogEntryRequest) returns (PullLogEntryResponse);
 }
 

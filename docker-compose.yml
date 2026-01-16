@@ -8,33 +8,31 @@ services:
     image: python-convert:latest
     container_name: ndn-grpc-sidecar
     ports:
-      - "50051:50051"
+      - "19090:19090"  # gRPC server port
+      - "6363:6363"     # NDN/NFD port
     environment:
       - MODE=sidecar
-      - GRPC_SERVER_PORT=50051
+      - GRPC_SERVER_PORT=19090
       - LOG_LEVEL=INFO
-      - NDN_PIB_PATH=/home/appuser/.ndn/pib.db
-      - NDN_TPM_PATH=/home/appuser/.ndn/ndnsec-key-file
+      - NDN_PIB_PATH=/root/.ndn/pib.db
+      - NDN_TPM_PATH=/root/.ndn/ndnsec-key-file
       # Main container address (if needed for bridge)
-      - GRPC_CLIENT_HOST=localhost:8080
+      - GRPC_CLIENT_HOST=localhost:8181
     volumes:
       # Mount config file (optional, can use environment variables)
       - ./config.yaml:/app/config.yaml:ro
-      # Mount NDN data directory (persistent storage)
-      - ndn-data:/home/appuser/.ndn
+      # Mount host NDN PIB and TPM (read-only to avoid concurrent write issues)
+      # All containers share the same identity from host
+      - /root/.ndn:/root/.ndn:ro
     networks:
       - ndn-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.settimeout(5); result = s.connect_ex(('localhost', 50051)); s.close(); exit(0 if result == 0 else 1)"]
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.settimeout(5); result = s.connect_ex(('localhost', 19090)); s.close(); exit(0 if result == 0 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
-volumes:
-  ndn-data:
-    driver: local
 
 networks:
   ndn-network:

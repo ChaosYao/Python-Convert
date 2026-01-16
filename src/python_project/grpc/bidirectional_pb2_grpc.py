@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class SimpleServiceStub(object):
-    """Simple gRPC service definition
+    """gRPC service definition
     """
 
     def __init__(self, channel):
@@ -35,19 +35,19 @@ class SimpleServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.Process = channel.unary_unary(
-                '/grpc.SimpleService/Process',
-                request_serializer=bidirectional__pb2.Data.SerializeToString,
-                response_deserializer=bidirectional__pb2.Data.FromString,
+        self.PullLogEntries = channel.unary_unary(
+                '/grpc.SimpleService/PullLogEntries',
+                request_serializer=bidirectional__pb2.PullLogEntryRequest.SerializeToString,
+                response_deserializer=bidirectional__pb2.PullLogEntryResponse.FromString,
                 _registered_method=True)
 
 
 class SimpleServiceServicer(object):
-    """Simple gRPC service definition
+    """gRPC service definition
     """
 
-    def Process(self, request, context):
-        """Simple RPC: request and response
+    def PullLogEntries(self, request, context):
+        """Pull log entries RPC
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -56,10 +56,10 @@ class SimpleServiceServicer(object):
 
 def add_SimpleServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Process': grpc.unary_unary_rpc_method_handler(
-                    servicer.Process,
-                    request_deserializer=bidirectional__pb2.Data.FromString,
-                    response_serializer=bidirectional__pb2.Data.SerializeToString,
+            'PullLogEntries': grpc.unary_unary_rpc_method_handler(
+                    servicer.PullLogEntries,
+                    request_deserializer=bidirectional__pb2.PullLogEntryRequest.FromString,
+                    response_serializer=bidirectional__pb2.PullLogEntryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -70,11 +70,11 @@ def add_SimpleServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class SimpleService(object):
-    """Simple gRPC service definition
+    """gRPC service definition
     """
 
     @staticmethod
-    def Process(request,
+    def PullLogEntries(request,
             target,
             options=(),
             channel_credentials=None,
@@ -87,9 +87,9 @@ class SimpleService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/grpc.SimpleService/Process',
-            bidirectional__pb2.Data.SerializeToString,
-            bidirectional__pb2.Data.FromString,
+            '/grpc.SimpleService/PullLogEntries',
+            bidirectional__pb2.PullLogEntryRequest.SerializeToString,
+            bidirectional__pb2.PullLogEntryResponse.FromString,
             options,
             channel_credentials,
             insecure,

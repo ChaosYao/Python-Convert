@@ -30,54 +30,21 @@ class SimpleClient:
             self.channel.close()
             logger.info("Disconnected")
     
-    def process_data(self, value: int, payload: str) -> bidirectional_pb2.Data:
+    def pull_log_entries(self, request: bidirectional_pb2.PullLogEntryRequest) -> bidirectional_pb2.PullLogEntryResponse:
+        """Call PullLogEntries RPC."""
         if not self.stub:
             self.connect()
         
-        request = bidirectional_pb2.Data(
-            value=value,
-            payload=payload
-        )
-        
-        logger.info(f"Sending data: value={value}, payload={payload}")
+        logger.info(f"Sending PullLogEntries request: group_id={request.group_id}, server_id={request.server_id}, peer_id={request.peer_id}")
         
         try:
-            response = self.stub.Process(request)
-            logger.info(f"Received response: value={response.value}, payload={response.payload}")
+            response = self.stub.PullLogEntries(request)
+            logger.info(f"Received PullLogEntries response: success={response.success}, term={response.term}")
             return response
         except grpc.RpcError as e:
             logger.error(f"gRPC error: {e.code()} - {e.details()}")
             raise
         except Exception as e:
-            logger.error(f"Error sending data: {e}", exc_info=True)
+            logger.error(f"Error calling PullLogEntries: {e}", exc_info=True)
             raise
-
-
-def run_client(server_address: Optional[str] = None,
-               data_list: Optional[list[tuple[int, str]]] = None,
-               config_path: Optional[str] = None):
-    config = get_config(config_path)
-    
-    if server_address is None:
-        server_address = config.get_grpc_client_host()
-    
-    if data_list is None:
-        data_list = config.get_grpc_test_data()
-    
-    client = SimpleClient(server_address, config_path)
-    try:
-        client.connect()
-        for value, payload in data_list:
-            response = client.process_data(value, payload)
-            logger.info(f"Result: value={response.value}, payload={response.payload}")
-    finally:
-        client.disconnect()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    run_client()
 

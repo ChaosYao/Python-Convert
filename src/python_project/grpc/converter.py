@@ -1,52 +1,119 @@
-# Simple converter between gRPC and NDN
+# Converter between gRPC and NDN
 import json
 import logging
+
+from ..utils import extract_host_from_server_id
 
 logger = logging.getLogger(__name__)
 
 
-def grpc_request_to_interest_name(grpc_data) -> str:
-    # Not implemented - all requests are forwarded to config prefix
-    return f"/grpc/process/{grpc_data.value}/{grpc_data.payload}"
-
-
-def interest_name_to_grpc_request(name: str):
-    # Not implemented - all requests are extracted from Interest app_param
-    from . import bidirectional_pb2
+def pull_log_entry_request_to_interest_name(request) -> str:
+    """
+    Convert PullLogEntryRequest to NDN Interest name.
     
-    parts = name.split('/')
-    if len(parts) >= 4 and parts[1] == 'grpc' and parts[2] == 'process':
-        try:
-            value = int(parts[3])
-            payload = '/'.join(parts[4:]) if len(parts) > 4 else f"from_ndn_{value}"
-            return bidirectional_pb2.Data(value=value, payload=payload)
-        except ValueError:
-            pass
-    
-    return bidirectional_pb2.Data(value=0, payload=name)
+    Format: /raft/{host}/{group_id}/{server_id}/{peer_id}/{term}/{prev_log_term}/{prev_log_index}
+    where host is extracted from server_id by taking the first part before '.'
+    """
+    # Extract host from server_id (split by '.' and take first part)
+    host = extract_host_from_server_id(request.server_id)
+    return f"/raft/{host}/{request.group_id}/{request.server_id}/{request.peer_id}/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
 
 
-def data_content_to_grpc_data(content: bytes):
+def pull_log_entry_request_to_data_content(request) -> bytes:
+    """
+    Convert PullLogEntryRequest to bytes for Interest app_param.
+    """
+    data = {
+        'group_id': request.group_id,
+        'server_id': request.server_id,
+        'peer_id': request.peer_id,
+        'term': request.term,
+        'prev_log_term': request.prev_log_term,
+        'prev_log_index': request.prev_log_index
+    }
+    return json.dumps(data).encode()
+
+
+def data_content_to_pull_log_entry_response(content: bytes):
+    """
+    Convert NDN Data content to PullLogEntryResponse.
+    """
     from . import bidirectional_pb2
     
     try:
         data = json.loads(content.decode())
-        return bidirectional_pb2.Data(
-            value=data.get('value', 0),
-            payload=data.get('payload', '')
-        )
-    except:
-        try:
-            value = int(content.decode())
-            return bidirectional_pb2.Data(value=value, payload=content.decode())
-        except:
-            return bidirectional_pb2.Data(value=0, payload=content.decode())
+        
+        response = bidirectional_pb2.PullLogEntryResponse()
+        response.term = data.get('term', 0)
+        response.success = data.get('success', False)
+        response.last_log_index = data.get('last_log_index', 0)
+        response.committed_index = data.get('committed_index', 0)
+        
+        # Parse entries with full EntryMeta structure
+        if 'entries' in data and isinstance(data['entries'], list):
+            for entry_data in data['entries']:
+                entry = response.entries.add()
+                entry.term = entry_data.get('term', 0)
+                # EntryType: convert string to enum value
+                entry_type_str = entry_data.get('type', 'ENTRY_TYPE_UNKNOWN')
+                if isinstance(entry_type_str, int):
+                    entry.type = entry_type_str
+                else:
+                    # Map string to enum
+                    type_map = {
+                        'ENTRY_TYPE_UNKNOWN': bidirectional_pb2.ENTRY_TYPE_UNKNOWN,
+                        'ENTRY_TYPE_NO_OP': bidirectional_pb2.ENTRY_TYPE_NO_OP,
+                        'ENTRY_TYPE_DATA': bidirectional_pb2.ENTRY_TYPE_DATA,
+                        'ENTRY_TYPE_CONFIGURATION': bidirectional_pb2.ENTRY_TYPE_CONFIGURATION,
+                    }
+                    entry.type = type_map.get(entry_type_str.upper(), bidirectional_pb2.ENTRY_TYPE_UNKNOWN)
+                
+                # Peers
+                if 'peers' in entry_data:
+                    entry.peers.extend(entry_data['peers'])
+                
+                # Data length
+                if 'data_len' in entry_data:
+                    entry.data_len = entry_data['data_len']
+                
+                # Old peers
+                if 'old_peers' in entry_data:
+                    entry.old_peers.extend(entry_data['old_peers'])
+                
+                # Checksum
+                if 'checksum' in entry_data:
+                    entry.checksum = entry_data['checksum']
+                
+                # Learners
+                if 'learners' in entry_data:
+                    entry.learners.extend(entry_data['learners'])
+                
+                # Old learners
+                if 'old_learners' in entry_data:
+                    entry.old_learners.extend(entry_data['old_learners'])
+        
+        # Parse data field
+        if 'data' in data:
+            if isinstance(data['data'], str):
+                response.data = data['data'].encode()
+            elif isinstance(data['data'], bytes):
+                response.data = data['data']
+        
+        # Parse error response (using errorCode and errorMsg)
+        if 'errorResponse' in data:
+            error_data = data['errorResponse']
+            response.errorResponse.errorCode = error_data.get('errorCode', 0)
+            response.errorResponse.errorMsg = error_data.get('errorMsg', '')
+        
+        return response
+    except Exception as e:
+        logger.error(f"Failed to parse Data content to PullLogEntryResponse: {e}", exc_info=True)
+        # Return error response
+        response = bidirectional_pb2.PullLogEntryResponse()
+        response.success = False
+        response.errorResponse.errorCode = 1  # PARSE_ERROR
+        response.errorResponse.errorMsg = str(e)
+        return response
 
 
-def grpc_data_to_data_content(grpc_data) -> bytes:
-    data = {
-        'value': grpc_data.value,
-        'payload': grpc_data.payload
-    }
-    return json.dumps(data).encode()
 
