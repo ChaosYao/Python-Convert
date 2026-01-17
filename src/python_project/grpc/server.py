@@ -47,29 +47,21 @@ class RequestRouterInterceptor(grpc.aio.ServerInterceptor):
     
     async def intercept_service(self, continuation, handler_call_details):
         """Intercept all RPC calls and route based on request type."""
-        # Get the original handler
         handler = await continuation(handler_call_details)
         
         if handler is None:
             return None
         
-        # Get method name from handler_call_details
         method_name = handler_call_details.method.split('/')[-1] if handler_call_details.method else None
         
-        # Create a wrapper handler that checks request type
         async def wrapper_handler(request, context):
-            # Check if request is PullLogEntryRequest
             if isinstance(request, bidirectional_pb2.PullLogEntryRequest):
-                # Convert to NDN Interest
                 logger.info(f"Routing {method_name} to NDN conversion (PullLogEntryRequest detected)")
                 return await self.servicer.PullLogEntries(request, context)
             else:
-                # Forward to target server
                 logger.info(f"Routing {method_name} to forward (non-PullLogEntryRequest: {type(request).__name__})")
                 return self.servicer._forward_rpc(method_name, request, context)
         
-        # Return the wrapper handler directly
-        # The handler should be callable with (request, context)
         return wrapper_handler
 
 
@@ -90,21 +82,17 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         Returns:
             Target server address (host:port) or None
         """
-        # Try to get from metadata first
         metadata = dict(context.invocation_metadata())
         target = metadata.get('target') or metadata.get('x-forward-to') or metadata.get('x-target-server')
         if target:
             logger.debug(f"Found target address in metadata: {target}")
             return target
         
-        # Try to extract from request fields (e.g., server_id might be in format "host:port")
         if hasattr(request, 'server_id') and request.server_id:
-            # Check if server_id looks like an address (contains ':')
             if ':' in request.server_id and not request.server_id.startswith('/'):
                 logger.debug(f"Using server_id as target address: {request.server_id}")
                 return request.server_id
         
-        # Fallback to configured forward_target
         if self._forward_target:
             logger.debug(f"Using configured forward_target: {self._forward_target}")
             return self._forward_target
@@ -126,8 +114,6 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         Returns:
             Response from target server
         """
-        # All non-PullLogEntries methods are forwarded directly
-        # Get target address from metadata, request fields, or configuration
         target = self._get_target_address(request, context)
         if not target:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -179,33 +165,28 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         """
         logger.info(f"Received PullLogEntries request: group_id={request.group_id}, server_id={request.server_id}, peer_id={request.peer_id}, term={request.term}")
         
-        # PullLogEntryRequest is always converted to NDN Interest (not forwarded)
-        
-        # Check if NDN client should be used
         use_ndn = self.config.get_grpc_server_use_ndn()
         
         if not use_ndn:
             logger.warning("NDN is disabled, but request reached here. This should not happen in sidecar mode.")
             response = bidirectional_pb2.PullLogEntryResponse()
             response.success = False
-            response.errorResponse.errorCode = 100  # NDN_DISABLED
+            response.errorResponse.errorCode = 100
             response.errorResponse.errorMsg = "NDN processing is disabled"
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             context.set_details("NDN processing is disabled")
             return response
         
-        # Convert to NDN Interest
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
             response = bidirectional_pb2.PullLogEntryResponse()
             response.success = False
-            response.errorResponse.errorCode = 101  # NDN_NOT_INITIALIZED
+            response.errorResponse.errorCode = 101
             response.errorResponse.errorMsg = "NDN client or queue not initialized"
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("NDN client or queue not initialized")
             return response
         
-        # Generate Interest name from request
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
         logger.info(f"Converting PullLogEntries to Interest: {interest_name}, content length: {len(request_content)}")
@@ -223,7 +204,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
                 logger.error("NDN queue not initialized")
                 response = bidirectional_pb2.PullLogEntryResponse()
                 response.success = False
-                response.errorResponse.errorCode = 102  # NDN_QUEUE_NOT_INITIALIZED
+                response.errorResponse.errorCode = 102
                 response.errorResponse.errorMsg = "NDN queue not initialized"
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("NDN queue not initialized")
@@ -252,7 +233,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
                 logger.warning("No Data received from NDN")
                 response = bidirectional_pb2.PullLogEntryResponse()
                 response.success = False
-                response.errorResponse.errorCode = 103  # NO_RESPONSE
+                response.errorResponse.errorCode = 103
                 response.errorResponse.errorMsg = "No response from NDN"
                 context.set_code(grpc.StatusCode.NOT_FOUND)
                 context.set_details("No response from NDN")
@@ -261,7 +242,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             logger.error("Timeout waiting for NDN response")
             response = bidirectional_pb2.PullLogEntryResponse()
             response.success = False
-            response.errorResponse.errorCode = 104  # TIMEOUT
+            response.errorResponse.errorCode = 104
             response.errorResponse.errorMsg = "Timeout waiting for NDN response"
             context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
             context.set_details("Timeout waiting for NDN response")
@@ -270,7 +251,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             logger.error(f"Error processing PullLogEntries request: {e}", exc_info=True)
             response = bidirectional_pb2.PullLogEntryResponse()
             response.success = False
-            response.errorResponse.errorCode = 105  # INTERNAL_ERROR
+            response.errorResponse.errorCode = 105
             response.errorResponse.errorMsg = str(e)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Error: {str(e)}")
@@ -291,14 +272,9 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
             _ndn_queue = Queue()
             logger.info("NDN interest queue created")
     
-    # Create servicer instance
     servicer = SimpleService(config_path=config_path)
-    
-    # Create server with interceptor to route requests based on type
     interceptor = RequestRouterInterceptor(servicer)
     server = grpc.aio.server(interceptors=[interceptor])
-    
-    # Register servicer
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(servicer, server)
     
     listen_addr = f'[::]:{port}'
@@ -306,7 +282,7 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
     
     logger.info(f"gRPC server starting on port {port}")
     if use_ndn:
-        logger.info("All gRPC requests will be routed through NDN")
+        logger.info("NDN enabled: PullLogEntryRequest will be converted to NDN Interest, other requests will be forwarded directly")
     else:
         logger.info("gRPC server running in default mode (NDN disabled)")
     return server
@@ -320,7 +296,6 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
     config = get_config(config_path)
     use_ndn = config.get_grpc_server_use_ndn()
     
-    # Only initialize NDN client if use_ndn is True
     if use_ndn:
         if _ndn_queue is None:
             logger.error("NDN queue not initialized")

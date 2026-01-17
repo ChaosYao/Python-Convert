@@ -131,10 +131,6 @@ class Config:
         """Get log level from config or environment."""
         return self.get('logging.level', 'INFO') or os.getenv('LOG_LEVEL', 'INFO')
     
-    def get_mode(self) -> Optional[str]:
-        """Get running mode from config or environment."""
-        return self.get('mode') or os.getenv('MODE')
-    
     def get_server_config(self) -> Dict[str, Any]:
         """Get server-specific configuration."""
         return self._config.get('server', {})
@@ -159,11 +155,12 @@ class Config:
     def get_grpc_client_host(self) -> str:
         """
         Get gRPC client host address.
-        In sidecar mode, always use localhost to connect to the local gRPC server.
+        Reads from config.yaml grpc.client.host, or uses localhost:8181 as default.
         """
-        # In sidecar mode, always use localhost
-        port = self.get_grpc_server_port()
-        return f"localhost:{port}"
+        host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
+        if host:
+            return host
+        return 'localhost:8181'
     
     def get_grpc_forward_target(self) -> Optional[str]:
         """

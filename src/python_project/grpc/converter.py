@@ -1,4 +1,5 @@
 # Converter between gRPC and NDN
+import base64
 import json
 import logging
 
@@ -11,12 +12,12 @@ def pull_log_entry_request_to_interest_name(request) -> str:
     """
     Convert PullLogEntryRequest to NDN Interest name.
     
-    Format: /raft/{host}/{group_id}/{server_id}/{peer_id}/{term}/{prev_log_term}/{prev_log_index}
-    where host is extracted from server_id by taking the first part before '.'
+    Format: /raft/{host}/pull/{term}/{prev_log_index}
+    where host is extracted from server_id by taking the first part before '.'.
+    All other parameters (group_id, server_id, peer_id, prev_log_term) are in app_param.
     """
-    # Extract host from server_id (split by '.' and take first part)
     host = extract_host_from_server_id(request.server_id)
-    return f"/raft/{host}/{request.group_id}/{request.server_id}/{request.peer_id}/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
+    return f"/raft/{host}/pull/{request.term}/{request.prev_log_index}"
 
 
 def pull_log_entry_request_to_data_content(request) -> bytes:
@@ -92,10 +93,15 @@ def data_content_to_pull_log_entry_response(content: bytes):
                 if 'old_learners' in entry_data:
                     entry.old_learners.extend(entry_data['old_learners'])
         
-        # Parse data field
+        # Parse data field: decode base64 if it's a string, otherwise use bytes directly
         if 'data' in data:
             if isinstance(data['data'], str):
-                response.data = data['data'].encode()
+                try:
+                    # Try base64 decode first (for binary data)
+                    response.data = base64.b64decode(data['data'])
+                except Exception:
+                    # If base64 decode fails, treat as UTF-8 text
+                    response.data = data['data'].encode('utf-8')
             elif isinstance(data['data'], bytes):
                 response.data = data['data']
         

@@ -11,8 +11,8 @@ from .server import run_server
 logger = logging.getLogger(__name__)
 
 
-def get_mode(config_path: Optional[str] = None) -> Optional[str]:
-    """Get running mode. Only 'server' mode is supported."""
+def get_mode(config_path: Optional[str] = None) -> str:
+    """Get running mode. Defaults to 'server' mode."""
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
         if mode == 'server':
@@ -27,7 +27,7 @@ def get_mode(config_path: Optional[str] = None) -> Optional[str]:
     if mode and mode.lower() == 'server':
         return mode.lower()
     
-    return None
+    return 'server'
 
 
 def main():
@@ -50,14 +50,14 @@ def main():
     
     mode = get_mode(config_path)
     
-    if mode == 'server':
-        try:
-            run_server(config_path=config_path)
-        except KeyboardInterrupt:
-            logger.info("Server stopped by user")
-        except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
-    else:
+    try:
+        run_server(config_path=config_path)
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+    
+    if False:  # Keep usage info for reference
         logger.info("Usage:")
         logger.info("  Command line: python -m python_project.grpc server [--config=path/to/config.yaml]")
         logger.info("  Environment:  MODE=server python -m python_project.grpc")

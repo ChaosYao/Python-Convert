@@ -1,5 +1,6 @@
 # NDN Server for receiving Interest packets and sending Data packets (Transfer Proxy)
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -92,85 +93,75 @@ class NDNServer:
             
             # Check if this is a PullLogEntries request (starts with /raft/)
             if name_str.startswith("/raft/"):
-                # Parse Interest name to reconstruct PullLogEntryRequest
-                # Format: /raft/{host}/{group_id}/{server_id}/{peer_id}/{term}/{prev_log_term}/{prev_log_index}
-                parts = name_str.split('/')
-                if len(parts) >= 9:
-                    try:
-                        host = parts[2]  # /raft/{host}/...
-                        group_id = parts[3]
-                        server_id = parts[4]
-                        peer_id = parts[5]
-                        term = int(parts[6])
-                        prev_log_term = int(parts[7])
-                        prev_log_index = int(parts[8])
-                        
-                        # Reconstruct PullLogEntryRequest from interest name
-                        grpc_request = bidirectional_pb2.PullLogEntryRequest()
-                        grpc_request.group_id = group_id
-                        grpc_request.server_id = server_id
-                        grpc_request.peer_id = peer_id
-                        grpc_request.term = term
-                        grpc_request.prev_log_term = prev_log_term
-                        grpc_request.prev_log_index = prev_log_index
-                        
-                        logger.info(f"gRPC bridge: Sending PullLogEntries request to {self.grpc_client.server_address}")
-                        # Use the gRPC client to call PullLogEntries
-                        # Note: SimpleClient needs to be extended to support PullLogEntries
-                        # For now, we'll use a workaround by calling the stub directly
-                        import grpc
-                        channel = grpc.insecure_channel(self.grpc_client.server_address)
-                        stub = bidirectional_pb2_grpc.SimpleServiceStub(channel)
-                        grpc_response = stub.PullLogEntries(grpc_request)
-                        channel.close()
-                        
-                        logger.info(f"gRPC bridge: Received PullLogEntryResponse: success={grpc_response.success}, term={grpc_response.term}")
-                        
-                        # Convert PullLogEntryResponse to NDN Data content
-                        data = {
-                            'term': grpc_response.term,
-                            'success': grpc_response.success,
-                            'last_log_index': grpc_response.last_log_index,
-                            'committed_index': grpc_response.committed_index,
-                            'entries': []
+                # Parse PullLogEntryRequest from app_param (content), not from interest name
+                if not app_param:
+                    logger.error("gRPC bridge: app_param is required for PullLogEntries request")
+                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': 'app_param is required'}}).encode()
+                
+                try:
+                    # Parse JSON from app_param
+                    app_data = json.loads(app_param.decode())
+                    
+                    # Reconstruct PullLogEntryRequest from app_param
+                    grpc_request = bidirectional_pb2.PullLogEntryRequest()
+                    grpc_request.group_id = app_data.get('group_id', '')
+                    grpc_request.server_id = app_data.get('server_id', '')
+                    grpc_request.peer_id = app_data.get('peer_id', '')
+                    grpc_request.term = app_data.get('term', 0)
+                    grpc_request.prev_log_term = app_data.get('prev_log_term', 0)
+                    grpc_request.prev_log_index = app_data.get('prev_log_index', 0)
+                    
+                    logger.info(f"gRPC bridge: Sending PullLogEntries request to {self.grpc_client.server_address}")
+                    import grpc
+                    from ..grpc import bidirectional_pb2_grpc
+                    channel = grpc.insecure_channel(self.grpc_client.server_address)
+                    stub = bidirectional_pb2_grpc.SimpleServiceStub(channel)
+                    grpc_response = stub.PullLogEntries(grpc_request)
+                    channel.close()
+                    
+                    logger.info(f"gRPC bridge: Received PullLogEntryResponse: success={grpc_response.success}, term={grpc_response.term}")
+                    
+                    # Convert PullLogEntryResponse to NDN Data content
+                    data = {
+                        'term': grpc_response.term,
+                        'success': grpc_response.success,
+                        'last_log_index': grpc_response.last_log_index,
+                        'committed_index': grpc_response.committed_index,
+                        'entries': []
+                    }
+                    
+                    # Convert entries with full EntryMeta structure
+                    for e in grpc_response.entries:
+                        entry_data = {
+                            'term': e.term,
+                            'type': e.type,
+                            'peers': list(e.peers),
+                            'old_peers': list(e.old_peers),
+                            'learners': list(e.learners),
+                            'old_learners': list(e.old_learners)
                         }
-                        
-                        # Convert entries with full EntryMeta structure
-                        for e in grpc_response.entries:
-                            entry_data = {
-                                'term': e.term,
-                                'type': e.type,  # EntryType enum value
-                                'peers': list(e.peers),
-                                'old_peers': list(e.old_peers),
-                                'learners': list(e.learners),
-                                'old_learners': list(e.old_learners)
-                            }
-                            if e.HasField('data_len'):
-                                entry_data['data_len'] = e.data_len
-                            if e.HasField('checksum'):
-                                entry_data['checksum'] = e.checksum
-                            data['entries'].append(entry_data)
-                        
-                        # Data field
-                        if grpc_response.data:
-                            data['data'] = grpc_response.data.decode('utf-8', errors='ignore')
-                        
-                        # Error response (using errorCode and errorMsg)
-                        if grpc_response.HasField('errorResponse'):
-                            data['errorResponse'] = {
-                                'errorCode': grpc_response.errorResponse.errorCode,
-                                'errorMsg': grpc_response.errorResponse.errorMsg
-                            }
-                        content = json.dumps(data).encode()
-                        logger.info(f"gRPC bridge: Converted PullLogEntryResponse to Data content, length: {len(content)} bytes")
-                        return content
-                    except (ValueError, IndexError) as e:
-                        logger.error(f"gRPC bridge: Failed to parse Interest name: {e}")
-                        return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': str(e)}}).encode()
-                else:
-                    logger.error(f"gRPC bridge: Invalid Interest name format for PullLogEntries: {name_str}")
-                    logger.error(f"Expected format: /raft/{{host}}/{{group_id}}/{{server_id}}/{{peer_id}}/{{term}}/{{prev_log_term}}/{{prev_log_index}}, got: {name_str}")
-                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 2, 'errorMsg': f'Invalid Interest name format: expected /raft/{{host}}/{{group_id}}/{{server_id}}/{{peer_id}}/{{term}}/{{prev_log_term}}/{{prev_log_index}}'}}).encode()
+                        if e.HasField('data_len'):
+                            entry_data['data_len'] = e.data_len
+                        if e.HasField('checksum'):
+                            entry_data['checksum'] = e.checksum
+                        data['entries'].append(entry_data)
+                    
+                    # Data field: encode bytes as base64 for JSON compatibility
+                    if grpc_response.data:
+                        data['data'] = base64.b64encode(grpc_response.data).decode('utf-8')
+                    
+                    # Error response (using errorCode and errorMsg)
+                    if grpc_response.HasField('errorResponse'):
+                        data['errorResponse'] = {
+                            'errorCode': grpc_response.errorResponse.errorCode,
+                            'errorMsg': grpc_response.errorResponse.errorMsg
+                        }
+                    content = json.dumps(data).encode()
+                    logger.info(f"gRPC bridge: Converted PullLogEntryResponse to Data content, length: {len(content)} bytes")
+                    return content
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    logger.error(f"gRPC bridge: Failed to parse app_param: {e}")
+                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'Failed to parse app_param: {str(e)}'}}).encode()
             else:
                 # Unknown Interest prefix, return error
                 logger.warning(f"gRPC bridge: Unknown Interest prefix: {name_str}")
