@@ -37,37 +37,62 @@ def run_sidecar(config_path: Optional[str] = None):
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
     
-    # Initialize NDN Server
-    ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+    # Initialize NDN Server (catch errors to keep container running)
+    ndn_server = None
+    try:
+        ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+        logger.info("NDN Server initialized successfully")
+    except Exception as e:
+        logger.error("=" * 50)
+        logger.error("FAILED to initialize NDN Server!")
+        logger.error(f"Error: {e}", exc_info=True)
+        logger.error("=" * 50)
+        logger.error("Container will continue running for debugging.")
+        logger.error("gRPC Server will still be available.")
+        logger.error("You can exec into the container to investigate:")
+        logger.error("  docker exec -it <container_name> /bin/bash")
+        logger.error("=" * 50)
+        # Continue without NDN Server - gRPC Server can still run
     
-    # Get hostname and extract host part (first part before '.')
-    hostname = get_hostname()
-    host = extract_host_from_server_id(hostname)
-    logger.info(f"Current hostname: {hostname}, extracted host: {host}")
-    
-    # Build route prefix based on hostname: /raft/{host}/
-    route_prefix = f"/raft/{host}"
-    logger.info(f"Registering route prefix: {route_prefix}")
-    ndn_server.register_route(route_prefix)
-    
-    # Start NDN Server in its own thread (thread-safe)
-    def run_ndn_server_thread():
-        """Run NDN Server in dedicated thread."""
+    # Start NDN Server in its own thread (only if initialization succeeded)
+    if ndn_server is not None:
+        # Get hostname and extract host part (first part before '.')
+        hostname = get_hostname()
+        host = extract_host_from_server_id(hostname)
+        logger.info(f"Current hostname: {hostname}, extracted host: {host}")
+        
+        # Build route prefix based on hostname: /raft/{host}/
+        route_prefix = f"/raft/{host}"
+        logger.info(f"Registering route prefix: {route_prefix}")
         try:
-            logger.info("NDN Server thread started")
-            ndn_server.app.run_forever()
+            ndn_server.register_route(route_prefix)
         except Exception as e:
-            logger.error(f"NDN Server error: {e}", exc_info=True)
-        finally:
-            ndn_server.shutdown()
-    
-    ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
-    ndn_server_thread.start()
+            logger.error(f"Failed to register NDN route: {e}", exc_info=True)
+            ndn_server = None  # Mark as failed
+        
+        if ndn_server is not None:
+            # Start NDN Server in its own thread (thread-safe)
+            def run_ndn_server_thread():
+                """Run NDN Server in dedicated thread."""
+                try:
+                    logger.info("NDN Server thread started")
+                    ndn_server.app.run_forever()
+                except Exception as e:
+                    logger.error(f"NDN Server error: {e}", exc_info=True)
+                finally:
+                    if ndn_server:
+                        ndn_server.shutdown()
+            
+            ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
+            ndn_server_thread.start()
     
     logger.info("=" * 50)
     logger.info("Sidecar mode started")
     logger.info(f"gRPC Server: port {config.get_grpc_server_port()}")
-    logger.info(f"NDN Server: listening on prefix {route_prefix}")
+    if ndn_server is not None:
+        logger.info(f"NDN Server: listening on prefix {route_prefix}")
+    else:
+        logger.warning("NDN Server: NOT running (initialization failed)")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
@@ -76,8 +101,17 @@ def run_sidecar(config_path: Optional[str] = None):
         asyncio.run(run_server_async(port=None, config_path=config_path))
     except KeyboardInterrupt:
         logger.info("Shutting down sidecar...")
-        ndn_server.shutdown()
+        if ndn_server is not None:
+            ndn_server.shutdown()
         logger.info("Sidecar stopped")
+    except Exception as e:
+        logger.error(f"gRPC Server error: {e}", exc_info=True)
+        logger.error("Container will keep running for debugging...")
+        # Keep container alive for debugging
+        import time
+        while True:
+            time.sleep(60)
+            logger.info("Container still running... (Ctrl+C to exit)")
 
 
 
@@ -111,7 +145,13 @@ def main():
     except KeyboardInterrupt:
         logger.info("Sidecar stopped by user")
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error("Container will keep running for debugging...")
+        # Keep container alive for debugging
+        import time
+        while True:
+            time.sleep(60)
+            logger.info("Container still running... (Ctrl+C to exit)")
 
 
 if __name__ == '__main__':
