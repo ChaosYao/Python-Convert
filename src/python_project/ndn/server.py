@@ -134,7 +134,7 @@ class NDNServer:
                     channel.close()
                     
                     logger.info(f"gRPC bridge: Received PullLogEntryResponse: success={grpc_response.success}, term={grpc_response.term}")
-                    
+            
                     # Convert PullLogEntryResponse to NDN Data content
                     data = {
                         'term': grpc_response.term,
@@ -209,30 +209,30 @@ class NDNServer:
             logger.warning(f"gRPC bridge not configured for prefix: {prefix}, skipping route registration")
             return
         
-        # Use gRPC bridge handler with prefix filtering
-        bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
-        @self.app.route(prefix)
-        def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
-            name_str = Name.to_str(name)
-            # Check if prefix is in configured bridge prefixes
-            in_bridge_prefixes = not bridge_prefixes or any(name_str.startswith(bp) for bp in bridge_prefixes)
-            
-            if not in_bridge_prefixes:
-                # Not in bridge_prefixes, ignore (only handle configured prefixes)
-                logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
-                return
-            
+            # Use gRPC bridge handler with prefix filtering
+            bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
+            @self.app.route(prefix)
+            def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+                name_str = Name.to_str(name)
+                # Check if prefix is in configured bridge prefixes
+                in_bridge_prefixes = not bridge_prefixes or any(name_str.startswith(bp) for bp in bridge_prefixes)
+                
+                if not in_bridge_prefixes:
+                    # Not in bridge_prefixes, ignore (only handle configured prefixes)
+                    logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
+                    return
+                
             # In bridge_prefixes, translate to gRPC request (NDN -> gRPC)
-            logger.info(f"Processing Interest with gRPC bridge: {name_str}")
-            try:
-                content = self._grpc_bridge_handler(name, param, app_param)
-            except Exception as e:
-                logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
-                content = f"Error: {e}".encode()
-            
-            logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
-            freshness_period = self.config.get_server_config().get('freshness_period', 10000)
-            self.app.put_data(name, content=content, freshness_period=freshness_period)
+                logger.info(f"Processing Interest with gRPC bridge: {name_str}")
+                try:
+                    content = self._grpc_bridge_handler(name, param, app_param)
+                except Exception as e:
+                    logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
+                    content = f"Error: {e}".encode()
+                
+                logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+                freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+                self.app.put_data(name, content=content, freshness_period=freshness_period)
         
         logger.info(f"Registered route: {prefix} (mode: gRPC bridge - NDN -> gRPC)")
     
