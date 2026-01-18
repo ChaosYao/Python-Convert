@@ -21,9 +21,10 @@ services:
     volumes:
       # Mount config file (optional, can use environment variables)
       - ./config.yaml:/app/config.yaml:ro
-      # Mount host NDN PIB and TPM (read-only to avoid concurrent write issues)
+      # Mount host NDN PIB and TPM (read-write to allow SQLite to create temporary files)
+      # Note: Application should use Keychain in read-only mode to avoid concurrent write issues
       # All containers share the same identity from host
-      - /root/.ndn:/root/.ndn:ro
+      - /root/.ndn:/root/.ndn:rw
     networks:
       - ndn-network
     restart: unless-stopped
