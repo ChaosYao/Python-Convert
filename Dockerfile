@@ -27,24 +27,19 @@ WORKDIR /app
 # Install runtime dependencies (if needed for python-ndn)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    gosu \
-    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user for security
-RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app /root/.ndn && \
-    chown -R appuser:appuser /app && \
-    chown -R root:root /root/.ndn
+# Create directories
+RUN mkdir -p /app /root/.ndn
 
 # Copy Python dependencies from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
-COPY --chown=appuser:appuser src/ ./src/
-COPY --chown=appuser:appuser config.yaml ./
-COPY --chown=appuser:appuser pyproject.toml ./
+COPY src/ ./src/
+COPY config.yaml ./
+COPY pyproject.toml ./
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
@@ -66,9 +61,12 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 19090  
 EXPOSE 6363   
 
-# Keep root user for entrypoint to fix permissions
-# Entrypoint will switch to appuser after fixing permissions
-# USER appuser  # Commented out - entrypoint handles user switch
+# Run as root user to avoid permission issues with mounted volumes
+# This is necessary because the mounted /root/.ndn directory needs root access
+USER root
+
+# Set entrypoint (simple pass-through since we're running as root)
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Health check (simple port check)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
