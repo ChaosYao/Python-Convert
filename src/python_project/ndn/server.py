@@ -37,16 +37,30 @@ class NDNServer:
                     pib_path = os.path.expanduser(pib_path)
                     pib_path = os.path.abspath(pib_path)
                     pib_dir = os.path.dirname(pib_path)
+                    # Only create directory if it doesn't exist
                     if pib_dir and not os.path.exists(pib_dir):
-                        os.makedirs(pib_dir, mode=0o700, exist_ok=True)
-                        logger.info(f"Created PIB directory: {pib_dir}")
+                        try:
+                            os.makedirs(pib_dir, mode=0o700, exist_ok=True)
+                            logger.info(f"Created PIB directory: {pib_dir}")
+                        except PermissionError:
+                            logger.warning(f"Permission denied when creating PIB directory: {pib_dir}, assuming it exists")
+                    elif pib_dir and os.path.exists(pib_dir):
+                        logger.debug(f"PIB directory already exists: {pib_dir}")
                 
                 if tpm_path:
                     tpm_path = os.path.expanduser(tpm_path)
                     tpm_path = os.path.abspath(tpm_path)
-                    if not os.path.exists(tpm_path):
-                        os.makedirs(tpm_path, mode=0o700, exist_ok=True)
-                        logger.info(f"Created TPM directory: {tpm_path}")
+                    # tpm_path might be a file path, get its directory
+                    tpm_dir = os.path.dirname(tpm_path)
+                    # Only create directory if it doesn't exist
+                    if tpm_dir and not os.path.exists(tpm_dir):
+                        try:
+                            os.makedirs(tpm_dir, mode=0o700, exist_ok=True)
+                            logger.info(f"Created TPM directory: {tpm_dir}")
+                        except PermissionError:
+                            logger.warning(f"Permission denied when creating TPM directory: {tpm_dir}, assuming it exists")
+                    elif tpm_dir and os.path.exists(tpm_dir):
+                        logger.debug(f"TPM directory already exists: {tpm_dir}")
                 
                 tpm = TpmFile(tpm_path) if tpm_path else TpmFile()
                 pib_path = pib_path or os.path.join(os.path.expanduser('~'), '.ndn', 'pib.db')
