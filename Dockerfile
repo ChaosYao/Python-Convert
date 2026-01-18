@@ -31,9 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app /tmp/.ndn && \
+    mkdir -p /app /root/.ndn && \
     chown -R appuser:appuser /app && \
-    chown -R appuser:appuser /tmp/.ndn
+    chown -R root:root /root/.ndn
 
 # Copy Python dependencies from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -50,8 +50,8 @@ RUN pip install --no-cache-dir -e .
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    NDN_PIB_PATH=/tmp/.ndn/pib.db \
-    NDN_TPM_PATH=/tmp/.ndn/ndnsec-key-file \
+    NDN_PIB_PATH=/root/.ndn/pib.db \
+    NDN_TPM_PATH=/root/.ndn/ndnsec-key-file \
     MODE=sidecar \
     GRPC_SERVER_PORT=19090 \
     LOG_LEVEL=INFO
