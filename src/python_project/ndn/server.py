@@ -116,6 +116,10 @@ class NDNServer:
                     # Parse JSON from app_param
                     app_data = json.loads(app_param.decode())
                     
+
+
+
+                    
                     # Reconstruct PullLogEntryRequest from app_param
                     grpc_request = bidirectional_pb2.PullLogEntryRequest()
                     grpc_request.group_id = app_data.get('group_id', '')
