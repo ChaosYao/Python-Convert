@@ -195,7 +195,7 @@ class NDNServer:
             logger.error(f"gRPC bridge error: {e}", exc_info=True)
             return json.dumps({'success': False, 'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}}).encode()
     
-    def register_route(self, prefix: str, use_grpc_bridge: Optional[bool] = None):
+    async def register_route(self, prefix: str, use_grpc_bridge: Optional[bool] = None) -> bool:
         """
         Register a route for Interest handling.
         
@@ -204,45 +204,88 @@ class NDNServer:
         Args:
             prefix: Interest prefix to register
             use_grpc_bridge: If True use gRPC bridge, if None use config
+
+        Returns:
+            True if NFD accepted the registration, False otherwise.
         """
         # Determine if gRPC bridge should be used
         if use_grpc_bridge is None:
             use_grpc_bridge = self.config.get_ndn_server_use_grpc()
         
         if not use_grpc_bridge or not self.grpc_client:
-            logger.warning(f"gRPC bridge not configured for prefix: {prefix}, skipping route registration")
-            return
-        
-            # Use gRPC bridge handler with prefix filtering
-            bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
-            @self.app.route(prefix)
-            def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+            # Still try to register the prefix so we can see explicit success/failure in logs.
+            # Reply with a clear error so callers know the bridge is disabled.
+            def not_configured_handler(name: FormalName, param: InterestParam, app_param: bytes):
                 name_str = Name.to_str(name)
-                # Check if prefix is in configured bridge prefixes
-                in_bridge_prefixes = not bridge_prefixes or any(name_str.startswith(bp) for bp in bridge_prefixes)
-                
-                if not in_bridge_prefixes:
-                    # Not in bridge_prefixes, ignore (only handle configured prefixes)
-                    logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
-                    return
-                
-            # In bridge_prefixes, translate to gRPC request (NDN -> gRPC)
-                logger.info(f"Processing Interest with gRPC bridge: {name_str}")
-                try:
-                    content = self._grpc_bridge_handler(name, param, app_param)
-                except Exception as e:
-                    logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
-                    content = f"Error: {e}".encode()
-                
-                logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+                logger.warning(f"Received Interest {name_str} but gRPC bridge is not configured")
+                content = json.dumps({
+                    'success': False,
+                    'errorResponse': {
+                        'errorCode': 5,
+                        'errorMsg': 'gRPC bridge not configured'
+                    }
+                }).encode()
                 freshness_period = self.config.get_server_config().get('freshness_period', 10000)
                 self.app.put_data(name, content=content, freshness_period=freshness_period)
+
+            try:
+                ok = await self.app.register(prefix, not_configured_handler)
+            except Exception as e:
+                logger.error(f"Failed to register route to NFD: {prefix}. Error: {e}", exc_info=True)
+                return False
+            if ok:
+                logger.info(f"Registered route to NFD: {prefix} (gRPC bridge disabled)")
+            else:
+                logger.error(f"Route registration to NFD returned False for prefix: {prefix}")
+            return ok
         
-        logger.info(f"Registered route: {prefix} (mode: gRPC bridge - NDN -> gRPC)")
+        # Use gRPC bridge handler with optional prefix filtering.
+        bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
+
+        def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+            name_str = Name.to_str(name)
+
+            # Check if Interest name is in configured bridge prefixes
+            in_bridge_prefixes = (not bridge_prefixes) or any(name_str.startswith(bp) for bp in bridge_prefixes)
+            if not in_bridge_prefixes:
+                logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
+                return
+
+            # Translate to gRPC request (NDN -> gRPC)
+            logger.info(f"Processing Interest with gRPC bridge: {name_str}")
+            try:
+                content = self._grpc_bridge_handler(name, param, app_param)
+            except Exception as e:
+                logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
+                content = json.dumps({
+                    'success': False,
+                    'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}
+                }).encode()
+
+            logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+            freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+            self.app.put_data(name, content=content, freshness_period=freshness_period)
+
+        # Register to NFD with explicit success/failure result.
+        try:
+            ok = await self.app.register(prefix, grpc_bridge_handler)
+        except Exception as e:
+            logger.error(f"Failed to register route to NFD: {prefix}. Error: {e}", exc_info=True)
+            return False
+
+        if ok:
+            logger.info(f"Registered route to NFD: {prefix} (mode: gRPC bridge - NDN -> gRPC)")
+        else:
+            logger.error(
+                f"Route registration to NFD returned False for prefix: {prefix}. "
+                f"This usually means NFD rejected the register command "
+                f"(authorization/trust schema/management policy)."
+            )
+        return ok
     
-    async def run(self):
+    async def run(self, after_start=None):
         logger.info("Starting NDN server...")
-        await self.app.run_forever()
+        await self.app.run_forever(after_start=after_start)
     
     def shutdown(self):
         if self.grpc_client:

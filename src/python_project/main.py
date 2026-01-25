@@ -64,27 +64,31 @@ def run_sidecar(config_path: Optional[str] = None):
         # Build route prefix based on hostname: /raft/{host}/
         route_prefix = f"/raft/{host}"
         logger.info(f"Registering route prefix: {route_prefix}")
-        try:
-            ndn_server.register_route(route_prefix)
-        except Exception as e:
-            logger.error(f"Failed to register NDN route: {e}", exc_info=True)
-            ndn_server = None  # Mark as failed
-        
-        if ndn_server is not None:
-            # Start NDN Server in its own thread (thread-safe)
-            def run_ndn_server_thread():
-                """Run NDN Server in dedicated thread."""
-                try:
-                    logger.info("NDN Server thread started")
-                    ndn_server.app.run_forever()
-                except Exception as e:
-                    logger.error(f"NDN Server error: {e}", exc_info=True)
-                finally:
-                    if ndn_server:
-                        ndn_server.shutdown()
-            
-            ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
-            ndn_server_thread.start()
+
+        # Start NDN Server in its own thread (thread-safe)
+        def run_ndn_server_thread():
+            """Run NDN Server in dedicated thread."""
+            try:
+                logger.info("NDN Server thread started")
+
+                async def after_nfd_connected():
+                    ok = await ndn_server.register_route(route_prefix)
+                    if not ok:
+                        logger.error(
+                            f"NDN prefix registration failed for {route_prefix}. "
+                            f"Please check NFD authorization/trust schema and `nfdc route list`."
+                        )
+
+                # Register AFTER the connection to NFD is established, and get an explicit True/False.
+                ndn_server.app.run_forever(after_start=after_nfd_connected())
+            except Exception as e:
+                logger.error(f"NDN Server error: {e}", exc_info=True)
+            finally:
+                if ndn_server:
+                    ndn_server.shutdown()
+
+        ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
+        ndn_server_thread.start()
     
     logger.info("=" * 50)
     logger.info("Sidecar mode started")
