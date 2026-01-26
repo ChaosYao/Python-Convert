@@ -50,17 +50,26 @@ def get_hostname() -> str:
 
 def extract_host_from_server_id(server_id: str) -> str:
     """
-    Extract host part from server_id by splitting on '.' and taking the first part.
+    Extract a stable host segment from server_id.
+
+    SOFA-JRaft often uses server_id like:
+      "<group>/<pod>.<namespace>.svc.cluster.local:8181"
+    For NDN name construction we must avoid '/' and ':port' leaking into a name component.
     
     Args:
-        server_id: Server ID string (e.g., "pod-1.example.com" or "server-1.namespace.svc.cluster.local")
+        server_id: Server ID string (e.g., "pod-1.example.com" or "group/pod-1.ns.svc:8181")
     
     Returns:
-        Host part (e.g., "pod-1" or "server-1")
+        Host part (e.g., "pod-1")
     """
     if not server_id:
         return 'unknown'
-    
-    # Split by '.' and take the first part
-    parts = server_id.split('.')
-    return parts[0] if parts else server_id
+
+    # Drop port if present
+    base = server_id.split(':', 1)[0]
+    # Drop group prefix if present (take last path segment)
+    base = base.rsplit('/', 1)[-1]
+    # Split by '.' and take the first DNS label
+    parts = base.split('.', 1)
+    host = parts[0] if parts else base
+    return host or 'unknown'

@@ -13,6 +13,7 @@ from ..config import get_config
 from ..ndn.client import NDNClient
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
+from .jraft_codec import decode_pull_log_entry_request, encode_pull_log_entry_response_from_ndn_content
 from .converter import (
     pull_log_entry_request_to_interest_name,
     pull_log_entry_request_to_data_content,
@@ -36,33 +37,143 @@ class InterestRequest:
     future: Future
 
 
-class RequestRouterInterceptor(grpc.aio.ServerInterceptor):
+class TransparentForwardingHandler(grpc.GenericRpcHandler):
     """
-    gRPC interceptor to route requests based on request type.
-    - PullLogEntryRequest -> convert to NDN Interest
-    - Other requests -> forward to target server
+    A GenericRpcHandler that catches *unknown* RPC methods and forwards them
+    to a configured target server without decoding the protobuf payload.
+
+    This is required because gRPC interceptors only run AFTER a method is found.
+    In sidecar mode we intentionally do not implement/register most raft RPCs,
+    so without this handler the server returns UNIMPLEMENTED immediately.
+
+    Rules:
+    - PullLogEntries: handled by the normal servicer (NDN conversion), so this
+      handler returns None for that method.
+    - Everything else: forwarded as raw bytes to `grpc.forward_target` (or
+      metadata override).
     """
-    def __init__(self, servicer):
-        self.servicer = servicer
-    
-    async def intercept_service(self, continuation, handler_call_details):
-        """Intercept all RPC calls and route based on request type."""
-        handler = await continuation(handler_call_details)
-        
-        if handler is None:
+    def __init__(self, config_path: Optional[str] = None):
+        self.config = get_config(config_path)
+
+    def _get_target_from_metadata(self, context: grpc.aio.ServicerContext) -> Optional[str]:
+        md = dict(context.invocation_metadata())
+        return md.get('target') or md.get('x-forward-to') or md.get('x-target-server')
+
+    def service(self, handler_call_details):
+        method = handler_call_details.method or ""
+        # Let the registered servicer handle our own PullLogEntries (proto3) endpoint.
+        if method.endswith("/PullLogEntries"):
             return None
-        
-        method_name = handler_call_details.method.split('/')[-1] if handler_call_details.method else None
-        
-        async def wrapper_handler(request, context):
-            if isinstance(request, bidirectional_pb2.PullLogEntryRequest):
-                logger.info(f"Routing {method_name} to NDN conversion (PullLogEntryRequest detected)")
-                return await self.servicer.PullLogEntries(request, context)
-            else:
-                logger.info(f"Routing {method_name} to forward (non-PullLogEntryRequest: {type(request).__name__})")
-                return self.servicer._forward_rpc(method_name, request, context)
-        
-        return wrapper_handler
+
+        # SOFA-JRaft grpc-impl uses `/<JavaClass>/_call` where JavaClass is request class name.
+        # We only intercept PullLogEntryRequest and translate it to NDN; all other methods are forwarded as-is.
+        is_jraft_call = method.endswith("/_call")
+        is_jraft_pull = (
+            is_jraft_call
+            and (
+                "RpcRequests$PullLogEntryRequest" in method
+                or "RpcRequests.PullLogEntryRequest" in method
+            )
+        )
+
+        # We only support unary-unary passthrough here (raft RPCs are unary).
+        async def unary_unary_passthrough(request_bytes: bytes, context: grpc.aio.ServicerContext) -> bytes:
+            if is_jraft_pull:
+                # Convert PullLogEntryRequest -> NDN Interest -> PullLogEntryResponse (protobuf bytes)
+                try:
+                    req = decode_pull_log_entry_request(request_bytes)
+                except Exception as e:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(f"Failed to decode PullLogEntryRequest: {e}")
+                    return b""
+
+                if _ndn_queue is None:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details("NDN queue not initialized")
+                    return b""
+
+                # Build NDN interest
+                interest_name = pull_log_entry_request_to_interest_name(req)
+                app_param = pull_log_entry_request_to_data_content(req)
+
+                client_config = self.config.get_client_config()
+                interest_lifetime = client_config.get('interest_lifetime', 4000)
+                disable_cache = self.config.get_client_disable_cache()
+
+                if _ndn_connected is not None and not _ndn_connected.is_set():
+                    await _ndn_connected.wait()
+
+                future = Future()
+                _ndn_queue.put(InterestRequest(
+                    interest_name=interest_name,
+                    app_param=app_param,
+                    lifetime=interest_lifetime,
+                    must_be_fresh=disable_cache,
+                    future=future
+                ))
+
+                timeout = (interest_lifetime / 1000) + 60
+                try:
+                    content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+                except asyncio.TimeoutError:
+                    context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+                    context.set_details("Timeout waiting for NDN response")
+                    return b""
+
+                if not content:
+                    context.set_code(grpc.StatusCode.NOT_FOUND)
+                    context.set_details("No response from NDN")
+                    return b""
+
+                try:
+                    return encode_pull_log_entry_response_from_ndn_content(content)
+                except Exception as e:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"Failed to encode PullLogEntryResponse: {e}")
+                    return b""
+
+            target = self._get_target_from_metadata(context) or self.config.get_grpc_forward_target()
+            if not target:
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(
+                    f"Method '{method}' not implemented in sidecar and no forward target configured "
+                    f"(set grpc.forward_target or pass metadata x-forward-to)"
+                )
+                return b""
+
+            try:
+                channel = grpc.aio.insecure_channel(target)
+                call = channel.unary_unary(
+                    method,
+                    request_serializer=lambda b: b,
+                    response_deserializer=lambda b: b,
+                )
+                resp = await call(request_bytes, metadata=context.invocation_metadata())
+                await channel.close()
+                return resp
+            except grpc.RpcError as e:
+                try:
+                    await channel.close()
+                except Exception:
+                    pass
+                context.set_code(e.code())
+                context.set_details(e.details() or "")
+                return b""
+            except Exception as e:
+                try:
+                    await channel.close()
+                except Exception:
+                    pass
+                logger.error(f"Error forwarding '{method}' to {target}: {e}", exc_info=True)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(str(e))
+                return b""
+
+        return grpc.unary_unary_rpc_method_handler(
+            unary_unary_passthrough,
+            request_deserializer=lambda b: b,
+            response_serializer=lambda b: b,
+        )
 
 
 class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
@@ -273,9 +384,10 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
             logger.info("NDN interest queue created")
     
     servicer = SimpleService(config_path=config_path)
-    interceptor = RequestRouterInterceptor(servicer)
-    server = grpc.aio.server(interceptors=[interceptor])
+    server = grpc.aio.server()
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(servicer, server)
+    # Catch-all forwarding for methods not registered in our proto/service.
+    server.add_generic_rpc_handlers((TransparentForwardingHandler(config_path=config_path),))
     
     listen_addr = f'[::]:{port}'
     server.add_insecure_port(listen_addr)
