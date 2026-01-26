@@ -78,6 +78,48 @@ def _skip_field(buf: bytes, pos: int, wire_type: int) -> int:
     raise ValueError(f"unsupported wire_type={wire_type}")
 
 
+def extract_string_field(buf: bytes, field_no: int) -> Optional[str]:
+    """
+    Extract the first occurrence of a string field from a proto2/proto3 message bytes.
+    This is used for "transparent forwarding" routing decisions without a full protobuf runtime.
+    """
+    pos = 0
+    while pos < len(buf):
+        key, pos = _decode_varint(buf, pos)
+        fno = key >> 3
+        wire_type = key & 0x7
+        if fno == field_no and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            val = buf[pos:pos + ln].decode("utf-8", errors="replace")
+            pos += ln
+            return val
+        pos = _skip_field(buf, pos, wire_type)
+    return None
+
+
+def normalize_peer_id_to_target(peer_id: str) -> Optional[str]:
+    """
+    Convert sofa-jraft peer_id/server_id style strings into a dialable host:port.
+    Examples:
+      "rhea_example-1/raft-1.raft.ns.svc.cluster.local:8181" -> "raft-1.raft.ns.svc.cluster.local:8181"
+      "raft-1.raft.ns.svc.cluster.local:8181" -> same
+    """
+    if not peer_id:
+        return None
+    s = peer_id.strip()
+    # remove wrapping <> if present in logs
+    if s.startswith("<") and s.endswith(">"):
+        s = s[1:-1].strip()
+    # take last path segment
+    s = s.rsplit("/", 1)[-1]
+    if not s:
+        return None
+    # must contain port to be dialable
+    if ":" not in s:
+        return None
+    return s
+
+
 # --- Request/Response types ---------------------------------------------------
 
 

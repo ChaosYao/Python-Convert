@@ -13,7 +13,12 @@ from ..config import get_config
 from ..ndn.client import NDNClient
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
-from .jraft_codec import decode_pull_log_entry_request, encode_pull_log_entry_response_from_ndn_content
+from .jraft_codec import (
+    decode_pull_log_entry_request,
+    encode_pull_log_entry_response_from_ndn_content,
+    extract_string_field,
+    normalize_peer_id_to_target,
+)
 from .converter import (
     pull_log_entry_request_to_interest_name,
     pull_log_entry_request_to_data_content,
@@ -132,12 +137,23 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     context.set_details(f"Failed to encode PullLogEntryResponse: {e}")
                     return b""
 
-            target = self._get_target_from_metadata(context) or self.config.get_grpc_forward_target()
+            target = self._get_target_from_metadata(context)
+            if not target and is_jraft_call:
+                # For SOFA-JRaft `_call` methods, try to derive target from request.peer_id.
+                # Most raft RPC requests use peer_id as field #3; ReadIndexRequest uses #4.
+                peer_id = extract_string_field(request_bytes, 3) or extract_string_field(request_bytes, 4)
+                derived = normalize_peer_id_to_target(peer_id) if peer_id else None
+                if derived:
+                    target = derived
+                    logger.info(f"Derived forward target from peer_id: {target} (method={method})")
+
+            if not target:
+                target = self.config.get_grpc_forward_target()
             if not target:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
                 context.set_details(
                     f"Method '{method}' not implemented in sidecar and no forward target configured "
-                    f"(set grpc.forward_target or pass metadata x-forward-to)"
+                    f"(set grpc.server.forward_target / GRPC_FORWARD_TARGET, or pass metadata x-forward-to)"
                 )
                 return b""
 
