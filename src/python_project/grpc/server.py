@@ -11,7 +11,7 @@ import grpc
 
 from ..config import get_config
 from ..ndn.client import NDNClient
-from ..utils import get_hostname, rewrite_target_to_localhost_if_self
+from ..utils import collect_local_identity_hosts, rewrite_target_to_localhost_if_self
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
 from .jraft_codec import (
@@ -146,7 +146,10 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 derived = normalize_peer_id_to_target(peer_id) if peer_id else None
                 if derived:
                     target = derived
-                    logger.info(f"Derived forward target from peer_id: {target} (method={method})")
+                    logger.info(
+                        f"Derived forward target from peer_id: {target} (method={method}, "
+                        f"local_identities={collect_local_identity_hosts()})"
+                    )
 
             if not target:
                 target = self.config.get_grpc_forward_target()
@@ -158,10 +161,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 )
                 return b""
 
-            rewritten = rewrite_target_to_localhost_if_self(target, get_hostname())
-            if rewritten != target:
-                logger.info(f"Target is local sidecar host, rewriting for forward: {target} -> {rewritten}")
-                target = rewritten
+            target = rewrite_target_to_localhost_if_self(target)
 
             try:
                 channel = grpc.aio.insecure_channel(target)
@@ -253,10 +253,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             context.set_details(f"Method '{method_name}' not implemented and no target address found (check metadata or config)")
             raise NotImplementedError(f"Method '{method_name}' not implemented and no target address found")
 
-        rewritten = rewrite_target_to_localhost_if_self(target, get_hostname())
-        if rewritten != target:
-            logger.info(f"Target is local sidecar host, rewriting for forward: {target} -> {rewritten}")
-            target = rewritten
+        target = rewrite_target_to_localhost_if_self(target)
         
         logger.info(f"Forwarding RPC method '{method_name}' to target server: {target}")
         try:
@@ -420,6 +417,11 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
     server.add_insecure_port(listen_addr)
     
     logger.info(f"gRPC server starting on port {port}")
+    logger.info(
+        "Sidecar forward localhost rewrite: local identity hostnames = %s "
+        "(used to detect when peer_id points at this pod; empty/wrong => no rewrite to localhost)",
+        collect_local_identity_hosts(),
+    )
     if use_ndn:
         logger.info("NDN enabled: PullLogEntryRequest will be converted to NDN Interest, other requests will be forwarded directly")
     else:
