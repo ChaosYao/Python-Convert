@@ -102,6 +102,10 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 len(request_bytes),
             )
             if is_jraft_pull:
+                logger.info(
+                    "transparent_passthrough jraft_branch: kind=pull_log_ndn (NDN path, no grpc outbound); method=%s",
+                    method,
+                )
                 # Convert PullLogEntryRequest -> NDN Interest -> PullLogEntryResponse (protobuf bytes)
                 try:
                     req = decode_pull_log_entry_request(request_bytes)
@@ -155,6 +159,13 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     context.set_details(f"Failed to encode PullLogEntryResponse: {e}")
                     return b""
 
+            # RequestVote, AppendEntries, InstallSnapshot, etc. use this branch (not PullLogEntry).
+            if is_jraft_call:
+                logger.info(
+                    "transparent_passthrough jraft_branch: kind=forward_rpc method=%s",
+                    method,
+                )
+
             target = self._get_target_from_metadata(context)
             if not target and is_jraft_call:
                 # For SOFA-JRaft `_call` methods, try to derive target from request.peer_id.
@@ -168,6 +179,12 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
             if not target:
                 target = self.config.get_grpc_forward_target()
             if not target:
+                logger.warning(
+                    "transparent_passthrough no_forward_target: method=%s is_jraft_call=%s "
+                    "(no peer_id/metadata and no grpc.server.forward_target / GRPC_FORWARD_TARGET)",
+                    method,
+                    is_jraft_call,
+                )
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
                 context.set_details(
                     f"Method '{method}' not implemented in sidecar and no forward target configured "
@@ -191,6 +208,12 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     method,
                     request_serializer=lambda b: b,
                     response_deserializer=lambda b: b,
+                )
+                logger.info(
+                    "transparent_passthrough outbound_begin: forward_target=%s method=%s (awaiting response; "
+                    "if this line exists but no outbound_ok/outbound_fail, remote is slow or hung)",
+                    target,
+                    method,
                 )
                 resp = await call(request_bytes, metadata=context.invocation_metadata())
                 await channel.close()
