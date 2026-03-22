@@ -84,6 +84,16 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
 
         # We only support unary-unary passthrough here (raft RPCs are unary).
         async def unary_unary_passthrough(request_bytes: bytes, context: grpc.aio.ServicerContext) -> bytes:
+            try:
+                inbound_peer = context.peer()
+            except Exception:
+                inbound_peer = "unknown"
+            logger.info(
+                "transparent_passthrough inbound: peer=%s method=%s request_bytes=%d",
+                inbound_peer,
+                method,
+                len(request_bytes),
+            )
             if is_jraft_pull:
                 # Convert PullLogEntryRequest -> NDN Interest -> PullLogEntryResponse (protobuf bytes)
                 try:

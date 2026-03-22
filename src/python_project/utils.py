@@ -180,12 +180,6 @@ def rewrite_target_to_localhost_if_self(target: str) -> str:
         return target
     identities = collect_local_identity_hosts()
     if not identities:
-        logger.info(
-            "localhost_rewrite_check: no local identities (POD_NAME/HOSTNAME/socket empty?); "
-            "cannot match peer_id host=%r target=%r — set POD_NAME or GRPC_SELF_HOSTNAME if needed",
-            h,
-            target,
-        )
         return target
     for local in identities:
         if _target_host_refers_to_local(h, local):
@@ -199,12 +193,4 @@ def rewrite_target_to_localhost_if_self(target: str) -> str:
                 out,
             )
             return out
-    logger.info(
-        "localhost_rewrite_check: NO MATCH target_host=%r port=%r identities=%r "
-        "(first DNS label of target must match a pod name in identities, e.g. raft-1; "
-        "if identities are wrong set POD_NAME fieldRef or GRPC_SELF_HOSTNAME)",
-        h,
-        port,
-        identities,
-    )
     return target
