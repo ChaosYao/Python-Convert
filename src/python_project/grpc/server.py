@@ -11,6 +11,7 @@ import grpc
 
 from ..config import get_config
 from ..ndn.client import NDNClient
+from ..utils import get_hostname, rewrite_target_to_localhost_if_self
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
 from .jraft_codec import (
@@ -157,6 +158,11 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 )
                 return b""
 
+            rewritten = rewrite_target_to_localhost_if_self(target, get_hostname())
+            if rewritten != target:
+                logger.info(f"Target is local sidecar host, rewriting for forward: {target} -> {rewritten}")
+                target = rewritten
+
             try:
                 channel = grpc.aio.insecure_channel(target)
                 call = channel.unary_unary(
@@ -246,6 +252,11 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             context.set_details(f"Method '{method_name}' not implemented and no target address found (check metadata or config)")
             raise NotImplementedError(f"Method '{method_name}' not implemented and no target address found")
+
+        rewritten = rewrite_target_to_localhost_if_self(target, get_hostname())
+        if rewritten != target:
+            logger.info(f"Target is local sidecar host, rewriting for forward: {target} -> {rewritten}")
+            target = rewritten
         
         logger.info(f"Forwarding RPC method '{method_name}' to target server: {target}")
         try:
