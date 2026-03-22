@@ -57,6 +57,13 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
       handler returns None for that method.
     - Everything else: forwarded as raw bytes to `grpc.forward_target` (or
       metadata override).
+
+    Traffic note (Kubernetes / JRaft):
+    - ``context.peer()`` on inbound is whoever connected *to this* process (the
+      Python sidecar port, e.g. 19090). Peers often call the *main* Raft gRPC
+      port (e.g. 8181) directly, so you may only see same-pod / loopback IPs
+      here. That does *not* by itself mean outbound forwarding failed; compare
+      ``transparent_passthrough outbound_ok`` / ``outbound_fail`` lines.
     """
     def __init__(self, config_path: Optional[str] = None):
         self.config = get_config(config_path)
@@ -156,10 +163,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 derived = normalize_peer_id_to_target(peer_id) if peer_id else None
                 if derived:
                     target = derived
-                    logger.info(
-                        f"Derived forward target from peer_id: {target} (method={method}, "
-                        f"local_identities={collect_local_identity_hosts()})"
-                    )
+                    logger.info(f"Derived forward target from peer_id: {target} (method={method})")
 
             if not target:
                 target = self.config.get_grpc_forward_target()
@@ -171,7 +175,15 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 )
                 return b""
 
+            resolved_target = target
             target = rewrite_target_to_localhost_if_self(target)
+            logger.info(
+                "transparent_passthrough route: resolved_target=%s forward_target=%s local_identities=%s method=%s",
+                resolved_target,
+                target,
+                collect_local_identity_hosts(),
+                method,
+            )
 
             try:
                 channel = grpc.aio.insecure_channel(target)
@@ -182,12 +194,25 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 )
                 resp = await call(request_bytes, metadata=context.invocation_metadata())
                 await channel.close()
+                logger.info(
+                    "transparent_passthrough outbound_ok: forward_target=%s method=%s response_bytes=%d",
+                    target,
+                    method,
+                    len(resp),
+                )
                 return resp
             except grpc.RpcError as e:
                 try:
                     await channel.close()
                 except Exception:
                     pass
+                logger.warning(
+                    "transparent_passthrough outbound_fail: forward_target=%s method=%s code=%s details=%s",
+                    target,
+                    method,
+                    e.code(),
+                    e.details() or "",
+                )
                 context.set_code(e.code())
                 context.set_details(e.details() or "")
                 return b""
@@ -196,7 +221,12 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     await channel.close()
                 except Exception:
                     pass
-                logger.error(f"Error forwarding '{method}' to {target}: {e}", exc_info=True)
+                logger.error(
+                    "transparent_passthrough outbound_error: forward_target=%s method=%s",
+                    target,
+                    method,
+                    exc_info=True,
+                )
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details(str(e))
                 return b""
@@ -263,7 +293,15 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             context.set_details(f"Method '{method_name}' not implemented and no target address found (check metadata or config)")
             raise NotImplementedError(f"Method '{method_name}' not implemented and no target address found")
 
+        resolved_target = target
         target = rewrite_target_to_localhost_if_self(target)
+        logger.info(
+            "SimpleService forward route: resolved_target=%s forward_target=%s local_identities=%s method=%s",
+            resolved_target,
+            target,
+            collect_local_identity_hosts(),
+            method_name,
+        )
         
         logger.info(f"Forwarding RPC method '{method_name}' to target server: {target}")
         try:
