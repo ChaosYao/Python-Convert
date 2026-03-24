@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import threading
+import os
 from queue import Queue
 from dataclasses import dataclass
 from concurrent.futures import Future
@@ -67,6 +68,11 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
     """
     def __init__(self, config_path: Optional[str] = None):
         self.config = get_config(config_path)
+        raw_timeout = os.getenv("GRPC_FORWARD_TIMEOUT_SEC", "5")
+        try:
+            self._forward_timeout_sec = float(raw_timeout)
+        except ValueError:
+            self._forward_timeout_sec = 5.0
 
     def _get_target_from_metadata(self, context: grpc.aio.ServicerContext) -> Optional[str]:
         md = dict(context.invocation_metadata())
@@ -210,12 +216,17 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     response_deserializer=lambda b: b,
                 )
                 logger.info(
-                    "transparent_passthrough outbound_begin: forward_target=%s method=%s (awaiting response; "
+                    "transparent_passthrough outbound_begin: forward_target=%s method=%s timeout_sec=%.2f (awaiting response; "
                     "if this line exists but no outbound_ok/outbound_fail, remote is slow or hung)",
                     target,
                     method,
+                    self._forward_timeout_sec,
                 )
-                resp = await call(request_bytes, metadata=context.invocation_metadata())
+                resp = await call(
+                    request_bytes,
+                    metadata=context.invocation_metadata(),
+                    timeout=self._forward_timeout_sec,
+                )
                 await channel.close()
                 logger.info(
                     "transparent_passthrough outbound_ok: forward_target=%s method=%s response_bytes=%d",
