@@ -222,10 +222,13 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     method,
                     self._forward_timeout_sec,
                 )
-                resp = await call(
-                    request_bytes,
-                    metadata=context.invocation_metadata(),
-                    timeout=self._forward_timeout_sec,
+                resp = await asyncio.wait_for(
+                    call(
+                        request_bytes,
+                        metadata=context.invocation_metadata(),
+                        timeout=self._forward_timeout_sec,
+                    ),
+                    timeout=self._forward_timeout_sec + 0.5,
                 )
                 await channel.close()
                 logger.info(
@@ -235,6 +238,31 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     len(resp),
                 )
                 return resp
+            except asyncio.TimeoutError:
+                try:
+                    await channel.close()
+                except Exception:
+                    pass
+                logger.warning(
+                    "transparent_passthrough outbound_timeout: forward_target=%s method=%s timeout_sec=%.2f",
+                    target,
+                    method,
+                    self._forward_timeout_sec,
+                )
+                context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+                context.set_details(f"Forward timeout after {self._forward_timeout_sec:.2f}s")
+                return b""
+            except asyncio.CancelledError:
+                try:
+                    await channel.close()
+                except Exception:
+                    pass
+                logger.warning(
+                    "transparent_passthrough outbound_cancelled: forward_target=%s method=%s",
+                    target,
+                    method,
+                )
+                raise
             except grpc.RpcError as e:
                 try:
                     await channel.close()
@@ -264,6 +292,12 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details(str(e))
                 return b""
+            finally:
+                logger.info(
+                    "transparent_passthrough outbound_finally: forward_target=%s method=%s",
+                    target,
+                    method,
+                )
 
         return grpc.unary_unary_rpc_method_handler(
             unary_unary_passthrough,
