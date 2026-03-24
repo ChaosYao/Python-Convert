@@ -257,10 +257,22 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     await channel.close()
                 except Exception:
                     pass
+                try:
+                    is_active = context.is_active()
+                except Exception:
+                    is_active = None
+                try:
+                    time_remaining = context.time_remaining()
+                except Exception:
+                    time_remaining = None
                 logger.warning(
-                    "transparent_passthrough outbound_cancelled: forward_target=%s method=%s",
+                    "transparent_passthrough outbound_cancelled: peer=%s forward_target=%s method=%s "
+                    "context_active=%s time_remaining=%s",
+                    inbound_peer,
                     target,
                     method,
+                    is_active,
+                    time_remaining,
                 )
                 raise
             except grpc.RpcError as e:
