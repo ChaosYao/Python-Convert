@@ -114,7 +114,13 @@ class NDNServer:
                 
                 try:
                     # Parse JSON from app_param
-                    app_data = json.loads(app_param.decode())
+                    if isinstance(app_param, memoryview):
+                        raw_param = app_param.tobytes()
+                    elif isinstance(app_param, bytes):
+                        raw_param = app_param
+                    else:
+                        raw_param = bytes(app_param)
+                    app_data = json.loads(raw_param.decode('utf-8'))
                     
 
 

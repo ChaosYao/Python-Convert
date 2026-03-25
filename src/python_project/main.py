@@ -37,63 +37,62 @@ def run_sidecar(config_path: Optional[str] = None):
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
     
-    # Initialize NDN Server (catch errors to keep container running)
-    ndn_server = None
-    try:
-        ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
-        logger.info("NDN Server initialized successfully")
-    except Exception as e:
-        logger.error("=" * 50)
-        logger.error("FAILED to initialize NDN Server!")
-        logger.error(f"Error: {e}", exc_info=True)
-        logger.error("=" * 50)
-        logger.error("Container will continue running for debugging.")
-        logger.error("gRPC Server will still be available.")
-        logger.error("You can exec into the container to investigate:")
-        logger.error("  docker exec -it <container_name> /bin/bash")
-        logger.error("=" * 50)
-        # Continue without NDN Server - gRPC Server can still run
-    
-    # Start NDN Server in its own thread (only if initialization succeeded)
-    if ndn_server is not None:
-        # Get hostname and extract host part (first part before '.')
-        hostname = get_hostname()
-        host = extract_host_from_server_id(hostname)
-        logger.info(f"Current hostname: {hostname}, extracted host: {host}")
-        
-        # Build route prefix based on hostname: /raft/{host}/
-        route_prefix = f"/raft/{host}"
-        logger.info(f"Registering route prefix: {route_prefix}")
+    # Build route prefix based on hostname: /raft/{host}/
+    hostname = get_hostname()
+    host = extract_host_from_server_id(hostname)
+    logger.info(f"Current hostname: {hostname}, extracted host: {host}")
+    route_prefix = f"/raft/{host}"
+    logger.info(f"Registering route prefix: {route_prefix}")
 
-        # Start NDN Server in its own thread (thread-safe)
-        def run_ndn_server_thread():
-            """Run NDN Server in dedicated thread."""
-            try:
-                logger.info("NDN Server thread started")
+    # IMPORTANT: create NDNServer in the SAME thread where app.run_forever() executes.
+    # KeychainSqlite3 uses sqlite objects that are thread-affine.
+    ndn_server_holder: dict[str, Optional[NDNServer]] = {"server": None}
+    ndn_init_done = threading.Event()
 
-                async def after_nfd_connected():
-                    ok = await ndn_server.register_route(route_prefix)
-                    if not ok:
-                        logger.error(
-                            f"NDN prefix registration failed for {route_prefix}. "
-                            f"Please check NFD authorization/trust schema and `nfdc route list`."
-                        )
+    def run_ndn_server_thread():
+        """Run NDN Server in dedicated thread."""
+        ndn_server: Optional[NDNServer] = None
+        try:
+            logger.info("NDN Server thread started")
+            ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+            ndn_server_holder["server"] = ndn_server
+            logger.info("NDN Server initialized successfully (NDN thread)")
+            ndn_init_done.set()
 
-                # Register AFTER the connection to NFD is established, and get an explicit True/False.
-                ndn_server.app.run_forever(after_start=after_nfd_connected())
-            except Exception as e:
-                logger.error(f"NDN Server error: {e}", exc_info=True)
-            finally:
-                if ndn_server:
-                    ndn_server.shutdown()
+            async def after_nfd_connected():
+                ok = await ndn_server.register_route(route_prefix)
+                if not ok:
+                    logger.error(
+                        f"NDN prefix registration failed for {route_prefix}. "
+                        f"Please check NFD authorization/trust schema and `nfdc route list`."
+                    )
 
-        ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
-        ndn_server_thread.start()
+            # Register AFTER the connection to NFD is established, and get an explicit True/False.
+            ndn_server.app.run_forever(after_start=after_nfd_connected())
+        except Exception as e:
+            ndn_init_done.set()
+            logger.error("=" * 50)
+            logger.error("FAILED to initialize/run NDN Server!")
+            logger.error(f"Error: {e}", exc_info=True)
+            logger.error("=" * 50)
+            logger.error("Container will continue running for debugging.")
+            logger.error("gRPC Server will still be available.")
+            logger.error("You can exec into the container to investigate:")
+            logger.error("  docker exec -it <container_name> /bin/bash")
+            logger.error("=" * 50)
+        finally:
+            if ndn_server:
+                ndn_server.shutdown()
+
+    ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
+    ndn_server_thread.start()
+    ndn_init_done.wait(timeout=5.0)
+    ndn_enabled = ndn_server_holder["server"] is not None
     
     logger.info("=" * 50)
     logger.info("Sidecar mode started")
     logger.info(f"gRPC Server: port {config.get_grpc_server_port()}")
-    if ndn_server is not None:
+    if ndn_enabled:
         logger.info(f"NDN Server: listening on prefix {route_prefix}")
     else:
         logger.warning("NDN Server: NOT running (initialization failed)")
@@ -105,8 +104,8 @@ def run_sidecar(config_path: Optional[str] = None):
         asyncio.run(run_server_async(port=None, config_path=config_path))
     except KeyboardInterrupt:
         logger.info("Shutting down sidecar...")
-        if ndn_server is not None:
-            ndn_server.shutdown()
+        if ndn_server_holder["server"] is not None:
+            ndn_server_holder["server"].shutdown()
         logger.info("Sidecar stopped")
     except Exception as e:
         logger.error(f"gRPC Server error: {e}", exc_info=True)
