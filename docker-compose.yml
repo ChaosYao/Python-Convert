@@ -17,7 +17,7 @@ services:
       - NDN_PIB_PATH=/root/.ndn/pib.db
       - NDN_TPM_PATH=/root/.ndn/ndnsec-key-file
       # Main container address (if needed for bridge)
-      - GRPC_CLIENT_HOST=localhost:8181
+      - GRPC_CLIENT_HOST=localhost:19090
     volumes:
       # Mount config file (optional, can use environment variables)
       - ./config.yaml:/app/config.yaml:ro

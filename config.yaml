@@ -55,7 +55,7 @@ grpc:
   # Client configuration
   client:
     # Server address (host:port)
-    host: localhost:8181  
+  host: localhost:19090  
   # Test data for client demo (value, payload)
   test_data:
     - [1, "test1"]
