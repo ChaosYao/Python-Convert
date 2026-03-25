@@ -185,18 +185,13 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
             if not target:
                 target = self.config.get_grpc_forward_target()
             if not target:
-                logger.warning(
-                    "transparent_passthrough no_forward_target: method=%s is_jraft_call=%s "
-                    "(no peer_id/metadata and no grpc.server.forward_target / GRPC_FORWARD_TARGET)",
+                target = self.config.get_grpc_client_host()
+                logger.info(
+                    "transparent_passthrough local_fallback: method=%s forward_target=%s "
+                    "(no peer_id/metadata/forward_target, fallback to grpc.client.host)",
                     method,
-                    is_jraft_call,
+                    target,
                 )
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(
-                    f"Method '{method}' not implemented in sidecar and no forward target configured "
-                    f"(set grpc.server.forward_target / GRPC_FORWARD_TARGET, or pass metadata x-forward-to)"
-                )
-                return b""
 
             resolved_target = target
             target = rewrite_target_to_localhost_if_self(target)
