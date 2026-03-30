@@ -52,10 +52,10 @@ grpc:
     # If false, requests will be processed by gRPC server directly
     use_ndn: true
   
-  # Client configuration
+  # Client configuration (NDN bridge -> Python gRPC; must be sidecar listen port, not JRaft 8181)
   client:
     # Server address (host:port)
-  host: localhost:19090  
+    host: localhost:19090
   # Test data for client demo (value, payload)
   test_data:
     - [1, "test1"]
