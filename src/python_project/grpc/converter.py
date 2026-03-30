@@ -11,12 +11,10 @@ logger = logging.getLogger(__name__)
 def pull_log_entry_request_to_interest_name(request) -> str:
     """
     Convert PullLogEntryRequest to NDN Interest name.
-    
-    Format: /raft/{host}/pull/{term}/{prev_log_index}
-    where host is extracted from server_id by taking the first part before '.'.
-    All other parameters (group_id, server_id, peer_id, prev_log_term) are in app_param.
+    Use peer_id as target host; fallback to server_id.
     """
-    host = extract_host_from_server_id(request.server_id)
+    target_id = request.peer_id or request.server_id
+    host = extract_host_from_server_id(target_id)
     return f"/raft/{host}/pull/{request.term}/{request.prev_log_index}"
 
 
