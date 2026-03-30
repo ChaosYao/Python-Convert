@@ -51,6 +51,8 @@ grpc:
     # If true, requests will be routed through NDN
     # If false, requests will be processed by gRPC server directly
     use_ndn: true
+    # JRaft in the same pod (no peer_id / Cli RPC fallback). Use loopback so iptables OUTPUT RETURN applies.
+    upstream_raft: 127.0.0.1:8181
   
   # Client configuration (NDN bridge -> Python gRPC; must be sidecar listen port, not JRaft 8181)
   client:

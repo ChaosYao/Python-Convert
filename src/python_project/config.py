@@ -154,13 +154,25 @@ class Config:
     
     def get_grpc_client_host(self) -> str:
         """
-        Get gRPC client host address.
-        Reads from config.yaml grpc.client.host, or uses localhost:8181 as default.
+        Address for NDN->gRPC bridge (SimpleClient): must reach this Python process
+        (typically grpc.server.port, e.g. localhost:19090).
         """
         host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
         if host:
             return host
-        return 'localhost:8181'
+        return 'localhost:19090'
+
+    def get_grpc_upstream_raft_addr(self) -> str:
+        """
+        Same-pod JRaft gRPC (Java), bypassing this sidecar's listen port.
+
+        Used when transparent forward has no peer_id/metadata (e.g. Cli GetLeaderRequest).
+        Must NOT be the sidecar port or requests will loop back into this process.
+        """
+        h = self.get('grpc.server.upstream_raft') or os.getenv('GRPC_UPSTREAM_RAFT')
+        if h:
+            return h
+        return '127.0.0.1:8181'
     
     def get_grpc_forward_target(self) -> Optional[str]:
         """

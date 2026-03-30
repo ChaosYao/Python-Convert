@@ -12,7 +12,11 @@ import grpc
 
 from ..config import get_config
 from ..ndn.client import NDNClient
-from ..utils import collect_local_identity_hosts, rewrite_target_to_localhost_if_self
+from ..utils import (
+    collect_local_identity_hosts,
+    parse_grpc_target_address,
+    rewrite_target_to_localhost_if_self,
+)
 from . import bidirectional_pb2
 from . import bidirectional_pb2_grpc
 from .jraft_codec import (
@@ -73,6 +77,29 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
             self._forward_timeout_sec = float(raw_timeout)
         except ValueError:
             self._forward_timeout_sec = 5.0
+
+    def _coerce_forward_target_away_from_self_listen(self, target: str, method: str) -> str:
+        """If target dials this process's gRPC port on loopback, use upstream JRaft instead (avoid self-loop)."""
+        host, port_s = parse_grpc_target_address(target)
+        if not host or not port_s:
+            return target
+        try:
+            port = int(port_s)
+        except ValueError:
+            return target
+        if port != self.config.get_grpc_server_port():
+            return target
+        hl = host.strip().lower()
+        if hl not in ("localhost", "127.0.0.1", "::1"):
+            return target
+        upstream = self.config.get_grpc_upstream_raft_addr()
+        logger.warning(
+            "transparent_passthrough loop_guard: would dial sidecar listen (%s) for %s; using upstream_raft=%s",
+            target,
+            method,
+            upstream,
+        )
+        return upstream
 
     def _get_target_from_metadata(self, context: grpc.aio.ServicerContext) -> Optional[str]:
         md = dict(context.invocation_metadata())
@@ -185,16 +212,17 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
             if not target:
                 target = self.config.get_grpc_forward_target()
             if not target:
-                target = self.config.get_grpc_client_host()
+                target = self.config.get_grpc_upstream_raft_addr()
                 logger.info(
                     "transparent_passthrough local_fallback: method=%s forward_target=%s "
-                    "(no peer_id/metadata/forward_target, fallback to grpc.client.host)",
+                    "(no peer_id/metadata/forward_target, fallback to grpc.server.upstream_raft / GRPC_UPSTREAM_RAFT)",
                     method,
                     target,
                 )
 
             resolved_target = target
             target = rewrite_target_to_localhost_if_self(target)
+            target = self._coerce_forward_target_away_from_self_listen(target, method)
             logger.info(
                 "transparent_passthrough route: resolved_target=%s forward_target=%s local_identities=%s method=%s",
                 resolved_target,
