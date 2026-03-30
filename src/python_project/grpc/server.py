@@ -449,7 +449,13 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         This method handles PullLogEntryRequest type requests by converting them to NDN Interest.
         Other request types should be handled by their respective RPC methods, which will call _forward_rpc().
         """
-        logger.info(f"Received PullLogEntries request: group_id={request.group_id}, server_id={request.server_id}, peer_id={request.peer_id}, term={request.term}")
+        logger.info(
+            "inbound_grpc PullLogEntries: group_id=%s server_id=%s peer_id=%s term=%s",
+            request.group_id,
+            request.server_id,
+            request.peer_id,
+            request.term,
+        )
         
         use_ndn = self.config.get_grpc_server_use_ndn()
         

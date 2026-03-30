@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 def pull_log_entry_request_to_interest_name(request) -> str:
     """
     Convert PullLogEntryRequest to NDN Interest name.
-    Use peer_id as target host; fallback to server_id.
+    Use server_id as target host; fallback to peer_id.
     """
-    target_id = request.peer_id or request.server_id
+    target_id = request.server_id or request.peer_id
     host = extract_host_from_server_id(target_id)
     return f"/raft/{host}/pull/{request.term}/{request.prev_log_index}"
 
@@ -23,6 +23,7 @@ def pull_log_entry_request_to_data_content(request) -> bytes:
     Convert PullLogEntryRequest to bytes for Interest app_param.
     """
     data = {
+        '_origin': 'grpc-sidecar',
         'group_id': request.group_id,
         'server_id': request.server_id,
         'peer_id': request.peer_id,

@@ -121,6 +121,13 @@ class NDNServer:
                     else:
                         raw_param = bytes(app_param)
                     app_data = json.loads(raw_param.decode('utf-8'))
+                    is_local_sidecar_interest = app_data.get('_origin') == 'grpc-sidecar'
+                    logger.info(
+                        "inbound_interest source=%s name=%s app_param_len=%d",
+                        "local_grpc_sidecar" if is_local_sidecar_interest else "external_interest",
+                        name_str,
+                        len(raw_param),
+                    )
                     
 
 
