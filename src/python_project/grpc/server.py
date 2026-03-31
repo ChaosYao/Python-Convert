@@ -206,8 +206,20 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 peer_id = extract_string_field(request_bytes, 3) or extract_string_field(request_bytes, 4)
                 derived = normalize_peer_id_to_target(peer_id) if peer_id else None
                 if derived:
-                    target = derived
-                    logger.info(f"Derived forward target from peer_id: {target} (method={method})")
+                    # Rewrite the JRaft port to the peer sidecar port so that
+                    # iptables OUTPUT rules (which only match APP_PORT / JRaft port)
+                    # do NOT re-intercept sidecar-to-sidecar traffic.  This lets
+                    # the entire stack run as uid=0 without redirect loops.
+                    peer_sidecar_port = self.config.get_peer_sidecar_port()
+                    host, _ = parse_grpc_target_address(derived)
+                    if host:
+                        target = f"{host}:{peer_sidecar_port}"
+                    else:
+                        target = derived
+                    logger.info(
+                        "Derived forward target from peer_id: %s -> %s (peer_sidecar_port=%d, method=%s)",
+                        derived, target, peer_sidecar_port, method,
+                    )
 
             if not target:
                 target = self.config.get_grpc_forward_target()

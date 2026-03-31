@@ -11,7 +11,7 @@ ndn:
   # Path to SQLite database file for storing public keys and certificates
   # Leave empty to use default: ~/.ndn/pib.db
   pib_path: /root/.ndn/pib.db
-  
+
   # TPM (Trusted Platform Module) directory path
   # Directory for storing private keys
   # Leave empty to use default: ~/.ndn/ndnsec-key-file
@@ -53,6 +53,9 @@ grpc:
     use_ndn: true
     # JRaft in the same pod (no peer_id / Cli RPC fallback). Use loopback so iptables OUTPUT RETURN applies.
     upstream_raft: 127.0.0.1:8181
+    # Port used when forwarding to a remote peer's sidecar.
+    # Must NOT be the JRaft port (APP_PORT in iptables), so OUTPUT rules don't re-intercept.
+    peer_sidecar_port: 19090
   
   # Client configuration (NDN bridge -> Python gRPC; must be sidecar listen port, not JRaft 8181)
   client:

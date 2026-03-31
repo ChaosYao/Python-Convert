@@ -58,14 +58,16 @@ ENV PYTHONUNBUFFERED=1 \
     LOG_LEVEL=INFO
 
 # Expose ports
-EXPOSE 19090  
-EXPOSE 6363   
+EXPOSE 19090
+EXPOSE 6363
 
-# Run as root user to avoid permission issues with mounted volumes
-# This is necessary because the mounted /root/.ndn directory needs root access
+# Run as root (uid=0). Loop prevention is handled at the protocol level:
+# sidecar-to-sidecar forwarding uses the sidecar port (PEER_SIDECAR_PORT, default 19090),
+# not the JRaft port (8181), so OUTPUT iptables rules (which only match port 8181)
+# never re-intercept the sidecar's own outbound traffic.
 USER root
 
-# Set entrypoint (simple pass-through since we're running as root)
+# Set entrypoint
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Health check (simple port check)
