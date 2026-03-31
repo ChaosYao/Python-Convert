@@ -133,6 +133,21 @@ class PullLogEntryRequestLite:
     prev_log_index: int = 0
 
 
+def encode_pull_log_entry_request(req: PullLogEntryRequestLite) -> bytes:
+    """
+    Encode PullLogEntryRequestLite to sofa-jraft proto2 wire bytes.
+    Used by the NDN server bridge when calling JRaft directly via /_call.
+    """
+    out = bytearray()
+    out += _encode_key(1, WIRE_LEN) + _encode_len_delimited(req.group_id.encode("utf-8"))
+    out += _encode_key(2, WIRE_LEN) + _encode_len_delimited(req.server_id.encode("utf-8"))
+    out += _encode_key(3, WIRE_LEN) + _encode_len_delimited(req.peer_id.encode("utf-8"))
+    out += _encode_key(4, WIRE_VARINT) + _encode_varint(req.term)
+    out += _encode_key(5, WIRE_VARINT) + _encode_varint(req.prev_log_term)
+    out += _encode_key(6, WIRE_VARINT) + _encode_varint(req.prev_log_index)
+    return bytes(out)
+
+
 def decode_pull_log_entry_request(buf: bytes) -> PullLogEntryRequestLite:
     """
     Decode sofa-jraft RpcRequests.PullLogEntryRequest (proto2) from bytes.
@@ -277,4 +292,119 @@ def encode_pull_log_entry_response_from_ndn_content(content: bytes) -> bytes:
         out += _encode_key(99, WIRE_LEN) + _encode_len_delimited(er)
 
     return bytes(out)
+
+
+# --- Decode PullLogEntryResponse (proto2 bytes → dict) ------------------------
+
+def _decode_entry_meta(buf: bytes) -> Dict[str, Any]:
+    """
+    Decode RaftOutter.EntryMeta from proto2 bytes into a JSON-compatible dict.
+    Fields match sofa-jraft raft.proto EntryMeta (fields 1-8).
+    """
+    entry: Dict[str, Any] = {
+        "term": 0,
+        "type": 0,
+        "peers": [],
+        "old_peers": [],
+        "learners": [],
+        "old_learners": [],
+    }
+    pos = 0
+    while pos < len(buf):
+        key, pos = _decode_varint(buf, pos)
+        field_no = key >> 3
+        wire_type = key & 0x7
+        if field_no == 1 and wire_type == WIRE_VARINT:
+            entry["term"], pos = _decode_varint(buf, pos)
+        elif field_no == 2 and wire_type == WIRE_VARINT:
+            entry["type"], pos = _decode_varint(buf, pos)
+        elif field_no == 3 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            entry["peers"].append(buf[pos:pos + ln].decode("utf-8", errors="replace"))
+            pos += ln
+        elif field_no == 4 and wire_type == WIRE_VARINT:
+            entry["data_len"], pos = _decode_varint(buf, pos)
+        elif field_no == 5 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            entry["old_peers"].append(buf[pos:pos + ln].decode("utf-8", errors="replace"))
+            pos += ln
+        elif field_no == 6 and wire_type == WIRE_VARINT:
+            entry["checksum"], pos = _decode_varint(buf, pos)
+        elif field_no == 7 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            entry["learners"].append(buf[pos:pos + ln].decode("utf-8", errors="replace"))
+            pos += ln
+        elif field_no == 8 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            entry["old_learners"].append(buf[pos:pos + ln].decode("utf-8", errors="replace"))
+            pos += ln
+        else:
+            pos = _skip_field(buf, pos, wire_type)
+    return entry
+
+
+def decode_pull_log_entry_response(buf: bytes) -> Dict[str, Any]:
+    """
+    Decode sofa-jraft RpcRequests.PullLogEntryResponse proto2 bytes into a
+    JSON-compatible dict (same shape as encode_pull_log_entry_response_from_ndn_content expects).
+
+    Fields (rpc.proto):
+      1  term            int64
+      2  success         bool
+      3  last_log_index  int64   (optional)
+      4  entries         EntryMeta (repeated)
+      5  committed_index int64   (optional)
+      6  data            bytes   (optional, base64-encoded in output dict)
+      99 errorResponse   ErrorResponse (optional)
+    """
+    result: Dict[str, Any] = {
+        "term": 0,
+        "success": False,
+        "last_log_index": 0,
+        "entries": [],
+        "committed_index": 0,
+    }
+    pos = 0
+    while pos < len(buf):
+        key, pos = _decode_varint(buf, pos)
+        field_no = key >> 3
+        wire_type = key & 0x7
+        if field_no == 1 and wire_type == WIRE_VARINT:
+            result["term"], pos = _decode_varint(buf, pos)
+        elif field_no == 2 and wire_type == WIRE_VARINT:
+            v, pos = _decode_varint(buf, pos)
+            result["success"] = bool(v)
+        elif field_no == 3 and wire_type == WIRE_VARINT:
+            result["last_log_index"], pos = _decode_varint(buf, pos)
+        elif field_no == 4 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            result["entries"].append(_decode_entry_meta(buf[pos:pos + ln]))
+            pos += ln
+        elif field_no == 5 and wire_type == WIRE_VARINT:
+            result["committed_index"], pos = _decode_varint(buf, pos)
+        elif field_no == 6 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            result["data"] = base64.b64encode(buf[pos:pos + ln]).decode("utf-8")
+            pos += ln
+        elif field_no == 99 and wire_type == WIRE_LEN:
+            ln, pos = _decode_varint(buf, pos)
+            err_buf = buf[pos:pos + ln]
+            pos += ln
+            err_code, err_msg = 0, ""
+            ep = 0
+            while ep < len(err_buf):
+                ek, ep = _decode_varint(err_buf, ep)
+                efno, ewt = ek >> 3, ek & 0x7
+                if efno == 1 and ewt == WIRE_VARINT:
+                    err_code, ep = _decode_varint(err_buf, ep)
+                elif efno == 2 and ewt == WIRE_LEN:
+                    eln, ep = _decode_varint(err_buf, ep)
+                    err_msg = err_buf[ep:ep + eln].decode("utf-8", errors="replace")
+                    ep += eln
+                else:
+                    ep = _skip_field(err_buf, ep, ewt)
+            result["errorResponse"] = {"errorCode": err_code, "errorMsg": err_msg}
+        else:
+            pos = _skip_field(buf, pos, wire_type)
+    return result
 

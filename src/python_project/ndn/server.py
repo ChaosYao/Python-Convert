@@ -12,6 +12,17 @@ from ndn.security import KeychainSqlite3, TpmFile
 from ..config import get_config
 from ..grpc.client import SimpleClient
 from ..grpc import bidirectional_pb2_grpc
+from ..grpc.jraft_codec import (
+    PullLogEntryRequestLite,
+    encode_pull_log_entry_request,
+    decode_pull_log_entry_response,
+)
+
+# sofa-jraft gRPC method path for PullLogEntryRequest.
+# GrpcClient.getCallMethod() generates: /<request.class.getName()>/_call
+_JRAFT_PULL_LOG_METHOD = (
+    "/com.alipay.sofa.jraft.rpc.RpcRequests$PullLogEntryRequest/_call"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,62 +147,47 @@ class NDNServer:
 
 
                     
-                    # Reconstruct PullLogEntryRequest from app_param
-                    grpc_request = bidirectional_pb2.PullLogEntryRequest()
-                    grpc_request.group_id = app_data.get('group_id', '')
-                    grpc_request.server_id = app_data.get('server_id', '')
-                    grpc_request.peer_id = app_data.get('peer_id', '')
-                    grpc_request.term = app_data.get('term', 0)
-                    grpc_request.prev_log_term = app_data.get('prev_log_term', 0)
-                    grpc_request.prev_log_index = app_data.get('prev_log_index', 0)
-                    
-                    logger.info(f"gRPC bridge: Sending PullLogEntries request to {self.grpc_client.server_address}")
-                    import grpc
-                    from ..grpc import bidirectional_pb2_grpc
-                    channel = grpc.insecure_channel(self.grpc_client.server_address)
-                    stub = bidirectional_pb2_grpc.SimpleServiceStub(channel)
-                    grpc_response = stub.PullLogEntries(grpc_request)
+                    # Reconstruct PullLogEntryRequestLite from app_param
+                    req_lite = PullLogEntryRequestLite(
+                        group_id=app_data.get('group_id', ''),
+                        server_id=app_data.get('server_id', ''),
+                        peer_id=app_data.get('peer_id', ''),
+                        term=app_data.get('term', 0),
+                        prev_log_term=app_data.get('prev_log_term', 0),
+                        prev_log_index=app_data.get('prev_log_index', 0),
+                    )
+
+                    # Encode as sofa-jraft proto2 bytes and call JRaft via /_call.
+                    # sofa-jraft does NOT expose grpc.SimpleService; it uses a
+                    # dynamic registry where each request class maps to /_call.
+                    req_bytes = encode_pull_log_entry_request(req_lite)
+                    logger.info(
+                        "gRPC bridge: Sending PullLogEntries to %s via %s (%d bytes)",
+                        self.grpc_client.server_address,
+                        _JRAFT_PULL_LOG_METHOD,
+                        len(req_bytes),
+                    )
+                    import grpc as _grpc
+                    channel = _grpc.insecure_channel(self.grpc_client.server_address)
+                    call = channel.unary_unary(
+                        _JRAFT_PULL_LOG_METHOD,
+                        request_serializer=lambda b: b,
+                        response_deserializer=lambda b: b,
+                    )
+                    resp_bytes = call(req_bytes)
                     channel.close()
-                    
-                    logger.info(f"gRPC bridge: Received PullLogEntryResponse: success={grpc_response.success}, term={grpc_response.term}")
-            
-                    # Convert PullLogEntryResponse to NDN Data content
-                    data = {
-                        'term': grpc_response.term,
-                        'success': grpc_response.success,
-                        'last_log_index': grpc_response.last_log_index,
-                        'committed_index': grpc_response.committed_index,
-                        'entries': []
-                    }
-                    
-                    # Convert entries with full EntryMeta structure
-                    for e in grpc_response.entries:
-                        entry_data = {
-                            'term': e.term,
-                            'type': e.type,
-                            'peers': list(e.peers),
-                            'old_peers': list(e.old_peers),
-                            'learners': list(e.learners),
-                            'old_learners': list(e.old_learners)
-                        }
-                        if e.HasField('data_len'):
-                            entry_data['data_len'] = e.data_len
-                        if e.HasField('checksum'):
-                            entry_data['checksum'] = e.checksum
-                        data['entries'].append(entry_data)
-                    
-                    # Data field: encode bytes as base64 for JSON compatibility
-                    if grpc_response.data:
-                        data['data'] = base64.b64encode(grpc_response.data).decode('utf-8')
-                    
-                    # Error response (using errorCode and errorMsg)
-                    if grpc_response.HasField('errorResponse'):
-                        data['errorResponse'] = {
-                            'errorCode': grpc_response.errorResponse.errorCode,
-                            'errorMsg': grpc_response.errorResponse.errorMsg
-                        }
+
+                    # Decode proto2 response → JSON-compatible dict → NDN Data content
+                    data = decode_pull_log_entry_response(resp_bytes)
+                    logger.info(
+                        "gRPC bridge: Received PullLogEntryResponse: success=%s term=%s",
+                        data.get('success'), data.get('term'),
+                    )
                     content = json.dumps(data).encode()
-                    logger.info(f"gRPC bridge: Converted PullLogEntryResponse to Data content, length: {len(content)} bytes")
+                    logger.info(
+                        "gRPC bridge: Converted PullLogEntryResponse to Data content, length: %d bytes",
+                        len(content),
+                    )
                     return content
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     logger.error(f"gRPC bridge: Failed to parse app_param: {e}")
