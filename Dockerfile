@@ -61,10 +61,10 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 19090
 EXPOSE 6363
 
-# Run as root (uid=0). Loop prevention is handled at the protocol level:
-# sidecar-to-sidecar forwarding uses the sidecar port (PEER_SIDECAR_PORT, default 19090),
-# not the JRaft port (8181), so OUTPUT iptables rules (which only match port 8181)
-# never re-intercept the sidecar's own outbound traffic.
+# Both sidecar and JRaft run as uid=0. Loop prevention uses port separation:
+# sidecar forwards to peer:PEER_SIDECAR_PORT (19090), not peer:8181, so the
+# OUTPUT REDIRECT rule (--dport 8181) never re-intercepts sidecar outbound traffic.
+# iptables init container must NOT include --uid-owner RETURN rule.
 USER root
 
 # Set entrypoint
