@@ -83,13 +83,16 @@ class NDNServer:
                 self.app = NDNApp()
                 logger.info("Using default PIB and TPM paths")
         
-        # Initialize gRPC client if bridge is enabled
+        # Initialize gRPC client if bridge is enabled.
+        # The bridge must call the local JRaft process (upstream_raft, e.g. 127.0.0.1:8181)
+        # directly, NOT the sidecar's own listen port (19090).  Calling the sidecar would
+        # cause a loop: sidecar -> NDN Interest -> NDN server -> sidecar -> NDN Interest -> ...
         self.grpc_client: Optional[SimpleClient] = None
         if self.config.get_ndn_server_use_grpc():
-            grpc_host = self.config.get_grpc_client_host()
+            grpc_host = self.config.get_grpc_upstream_raft_addr()
             self.grpc_client = SimpleClient(server_address=grpc_host, config_path=config_path)
             self.grpc_client.connect()
-            logger.info(f"gRPC client initialized for bridge: {grpc_host}")
+            logger.info(f"gRPC client initialized for bridge (upstream JRaft): {grpc_host}")
     
     def _grpc_bridge_handler(self, name: FormalName, param: InterestParam, app_param: bytes) -> bytes:
         """Handler that bridges Interest to gRPC request."""

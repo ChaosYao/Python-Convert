@@ -154,8 +154,11 @@ class Config:
     
     def get_grpc_client_host(self) -> str:
         """
-        Address for NDN->gRPC bridge (SimpleClient): must reach this Python process
-        (typically grpc.server.port, e.g. localhost:19090).
+        Address for gRPC client demos / tests.
+
+        NOTE: the NDN server's Interest->gRPC bridge does NOT use this; it uses
+        get_grpc_upstream_raft_addr() (127.0.0.1:8181) so that it calls JRaft
+        directly instead of looping back through the sidecar.
         """
         host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
         if host:
