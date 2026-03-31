@@ -174,6 +174,25 @@ class Config:
             return h
         return '127.0.0.1:8181'
     
+    def get_peer_sidecar_port(self) -> int:
+        """
+        Port used when forwarding to a remote peer's sidecar.
+
+        When the sidecar derives a forward target from peer_id (e.g. raft-1:8181),
+        it rewrites the port to this value (e.g. raft-1:19090) so that outbound
+        traffic targets the peer's sidecar port instead of the JRaft port.
+        This keeps all sidecar-to-sidecar communication on a port that is NOT
+        covered by the iptables OUTPUT REDIRECT rule (which only matches APP_PORT /
+        the JRaft port), preventing re-interception loops even when both processes
+        run as uid=0.
+
+        Override via env var PEER_SIDECAR_PORT.
+        """
+        v = self.get('grpc.server.peer_sidecar_port') or os.getenv('PEER_SIDECAR_PORT')
+        if v:
+            return int(v)
+        return self.get_grpc_server_port()
+
     def get_grpc_forward_target(self) -> Optional[str]:
         """
         Get target gRPC server address for direct forwarding (without NDN conversion).
