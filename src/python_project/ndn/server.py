@@ -264,7 +264,16 @@ class NDNServer:
         # Use gRPC bridge handler with optional prefix filtering.
         bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
 
-        async def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+        # python-ndn requires the registered callback to be a plain synchronous
+        # function — if an async def is passed, calling it just creates a coroutine
+        # object that is immediately discarded, so the handler body never runs and
+        # no Data packet is ever sent.
+        #
+        # To keep the event loop unblocked (needed to maintain the NFD heartbeat
+        # and avoid NACK 150), the sync handler schedules the real async work as
+        # an asyncio Task via ensure_future().  The task awaits the gRPC call
+        # without stalling the loop, then calls put_data when done.
+        def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
             name_str = Name.to_str(name)
 
             # Check if Interest name is in configured bridge prefixes
@@ -273,20 +282,23 @@ class NDNServer:
                 logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
                 return
 
-            # Translate to gRPC request (NDN -> gRPC)
             logger.info(f"Processing Interest with gRPC bridge: {name_str}")
-            try:
-                content = await self._grpc_bridge_handler(name, param, app_param)
-            except Exception as e:
-                logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
-                content = json.dumps({
-                    'success': False,
-                    'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}
-                }).encode()
 
-            logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
-            freshness_period = self.config.get_server_config().get('freshness_period', 10000)
-            self.app.put_data(name, content=content, freshness_period=freshness_period)
+            async def _handle():
+                try:
+                    content = await self._grpc_bridge_handler(name, param, app_param)
+                except Exception as e:
+                    logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
+                    content = json.dumps({
+                        'success': False,
+                        'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}
+                    }).encode()
+
+                logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+                freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+                self.app.put_data(name, content=content, freshness_period=freshness_period)
+
+            asyncio.ensure_future(_handle())
 
         # Register to NFD with explicit success/failure result.
         try:
