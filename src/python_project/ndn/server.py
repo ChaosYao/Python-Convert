@@ -289,11 +289,21 @@ class NDNServer:
                     }).encode()
 
                 logger.debug(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+
                 # call_soon_threadsafe schedules put_data on the event loop thread —
                 # never call python-ndn APIs directly from a worker thread.
-                loop.call_soon_threadsafe(
-                    lambda: self.app.put_data(name, content=content, freshness_period=freshness_period)
-                )
+                # Wrap in try/except so any exception from put_data is surfaced
+                # explicitly instead of being swallowed by asyncio's callback handler.
+                def _put_data_safe():
+                    try:
+                        self.app.put_data(name, content=content, freshness_period=freshness_period)
+                    except Exception as e:
+                        logger.error(
+                            "put_data FAILED for %s — this may cause NDN app to disconnect: %s",
+                            name_str, e, exc_info=True,
+                        )
+
+                loop.call_soon_threadsafe(_put_data_safe)
 
             self._bridge_executor.submit(_in_thread)
 
