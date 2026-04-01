@@ -38,13 +38,13 @@ class NDNServer:
         config_path: Optional[str] = None
     ):
         self.config = get_config(config_path)
-        
+
         if app is not None:
             self.app = app
         else:
             pib_path = pib_path or os.getenv('NDN_PIB_PATH')
             tpm_path = tpm_path or os.getenv('NDN_TPM_PATH')
-            
+
             if pib_path or tpm_path:
                 if pib_path:
                     pib_path = os.path.expanduser(pib_path)
@@ -59,7 +59,7 @@ class NDNServer:
                             logger.warning(f"Permission denied when creating PIB directory: {pib_dir}, assuming it exists")
                     elif pib_dir and os.path.exists(pib_dir):
                         logger.debug(f"PIB directory already exists: {pib_dir}")
-                
+
                 if tpm_path:
                     tpm_path = os.path.expanduser(tpm_path)
                     tpm_path = os.path.abspath(tpm_path)
@@ -74,10 +74,10 @@ class NDNServer:
                             logger.warning(f"Permission denied when creating TPM directory: {tpm_dir}, assuming it exists")
                     elif tpm_dir and os.path.exists(tpm_dir):
                         logger.debug(f"TPM directory already exists: {tpm_dir}")
-                
+
                 tpm = TpmFile(tpm_path) if tpm_path else TpmFile()
                 pib_path = pib_path or os.path.join(os.path.expanduser('~'), '.ndn', 'pib.db')
-                
+
                 try:
                     keychain = KeychainSqlite3(pib_path, tpm)
                     self.app = NDNApp(keychain=keychain)
@@ -95,7 +95,7 @@ class NDNServer:
             else:
                 self.app = NDNApp()
                 logger.info("Using default PIB and TPM paths")
-        
+
         # Initialize gRPC client if bridge is enabled.
         # The bridge must call the local JRaft process (upstream_raft, e.g. 127.0.0.1:8181)
         # directly, NOT the sidecar's own listen port (19090).  Calling the sidecar would
@@ -106,28 +106,36 @@ class NDNServer:
             self.grpc_client = SimpleClient(server_address=grpc_host, config_path=config_path)
             self.grpc_client.connect()
             logger.info(f"gRPC client initialized for bridge (upstream JRaft): {grpc_host}")
-    
-    def _grpc_bridge_handler(self, name: FormalName, param: InterestParam, app_param: bytes) -> bytes:
-        """Handler that bridges Interest to gRPC request."""
+
+    async def _grpc_bridge_handler(self, name: FormalName, param: InterestParam, app_param: bytes) -> bytes:
+        """
+        Bridge an NDN Interest to a gRPC request and return the response bytes.
+
+        This method is **async** so that the asyncio event loop is never blocked
+        while waiting for JRaft to respond.  Using the old synchronous
+        grpc.insecure_channel + blocking call() would stall the event loop,
+        preventing python-ndn from maintaining its NFD heartbeat and causing NFD
+        to de-register the FIB entry — which manifests as NACK 150 (NoRoute).
+        """
         name_str = Name.to_str(name)
         logger.info(f"gRPC bridge: Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
-        
+
         if self.grpc_client is None:
             error_msg = "gRPC client not initialized"
             logger.error(error_msg)
             return f"Error: {error_msg}".encode()
-        
+
         try:
             from ..grpc import bidirectional_pb2
             from ..utils import extract_host_from_server_id
-            
+
             # Check if this is a PullLogEntries request (starts with /raft/)
             if name_str.startswith("/raft/"):
                 # Parse PullLogEntryRequest from app_param (content), not from interest name
                 if not app_param:
                     logger.error("gRPC bridge: app_param is required for PullLogEntries request")
                     return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': 'app_param is required'}}).encode()
-                
+
                 try:
                     # Parse JSON from app_param
                     if isinstance(app_param, memoryview):
@@ -144,11 +152,7 @@ class NDNServer:
                         name_str,
                         len(raw_param),
                     )
-                    
 
-
-
-                    
                     # Reconstruct PullLogEntryRequestLite from app_param
                     req_lite = PullLogEntryRequestLite(
                         group_id=app_data.get('group_id', ''),
@@ -162,6 +166,8 @@ class NDNServer:
                     # Encode as sofa-jraft proto2 bytes and call JRaft via /_call.
                     # sofa-jraft does NOT expose grpc.SimpleService; it uses a
                     # dynamic registry where each request class maps to /_call.
+                    # grpc.aio is used so the await yields control back to the
+                    # event loop during the network round-trip (no blocking).
                     req_bytes = encode_pull_log_entry_request(req_lite)
                     logger.info(
                         "gRPC bridge: Sending PullLogEntries to %s via %s (%d bytes)",
@@ -169,15 +175,17 @@ class NDNServer:
                         _JRAFT_PULL_LOG_METHOD,
                         len(req_bytes),
                     )
-                    import grpc as _grpc
-                    channel = _grpc.insecure_channel(self.grpc_client.server_address)
-                    call = channel.unary_unary(
-                        _JRAFT_PULL_LOG_METHOD,
-                        request_serializer=lambda b: b,
-                        response_deserializer=lambda b: b,
-                    )
-                    resp_bytes = call(req_bytes)
-                    channel.close()
+                    import grpc.aio as _grpc_aio
+                    channel = _grpc_aio.insecure_channel(self.grpc_client.server_address)
+                    try:
+                        call = channel.unary_unary(
+                            _JRAFT_PULL_LOG_METHOD,
+                            request_serializer=lambda b: b,
+                            response_deserializer=lambda b: b,
+                        )
+                        resp_bytes = await call(req_bytes)
+                    finally:
+                        await channel.close()
 
                     # Decode proto2 response → JSON-compatible dict → NDN Data content
                     data = decode_pull_log_entry_response(resp_bytes)
@@ -204,17 +212,17 @@ class NDNServer:
                         'errorMsg': f'Unknown Interest prefix: {name_str}'
                     }
                 }).encode()
-            
+
         except Exception as e:
             logger.error(f"gRPC bridge error: {e}", exc_info=True)
             return json.dumps({'success': False, 'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}}).encode()
-    
+
     async def register_route(self, prefix: str, use_grpc_bridge: Optional[bool] = None) -> bool:
         """
         Register a route for Interest handling.
-        
+
         Only supports gRPC bridge mode: NDN Interest -> gRPC request -> gRPC response -> NDN Data
-        
+
         Args:
             prefix: Interest prefix to register
             use_grpc_bridge: If True use gRPC bridge, if None use config
@@ -225,7 +233,7 @@ class NDNServer:
         # Determine if gRPC bridge should be used
         if use_grpc_bridge is None:
             use_grpc_bridge = self.config.get_ndn_server_use_grpc()
-        
+
         if not use_grpc_bridge or not self.grpc_client:
             # Still try to register the prefix so we can see explicit success/failure in logs.
             # Reply with a clear error so callers know the bridge is disabled.
@@ -252,11 +260,11 @@ class NDNServer:
             else:
                 logger.error(f"Route registration to NFD returned False for prefix: {prefix}")
             return ok
-        
+
         # Use gRPC bridge handler with optional prefix filtering.
         bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
 
-        def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+        async def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
             name_str = Name.to_str(name)
 
             # Check if Interest name is in configured bridge prefixes
@@ -268,7 +276,7 @@ class NDNServer:
             # Translate to gRPC request (NDN -> gRPC)
             logger.info(f"Processing Interest with gRPC bridge: {name_str}")
             try:
-                content = self._grpc_bridge_handler(name, param, app_param)
+                content = await self._grpc_bridge_handler(name, param, app_param)
             except Exception as e:
                 logger.error(f"gRPC bridge handler error: {e}", exc_info=True)
                 content = json.dumps({
@@ -296,7 +304,7 @@ class NDNServer:
                 f"(authorization/trust schema/management policy)."
             )
         return ok
-    
+
     # ------------------------------------------------------------------
     # Persistent face / route management
     # ------------------------------------------------------------------
@@ -389,4 +397,3 @@ class NDNServer:
             logger.info("gRPC client disconnected")
         if self.app:
             self.app.shutdown()
-
