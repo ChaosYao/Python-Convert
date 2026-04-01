@@ -123,7 +123,7 @@ class NDNServer:
         free to maintain the NFD face heartbeat at all times.
         """
         name_str = Name.to_str(name)
-        logger.info(f"gRPC bridge: Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
+        logger.debug(f"gRPC bridge: Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
 
         if self.grpc_client is None:
             error_msg = "gRPC client not initialized"
@@ -145,7 +145,7 @@ class NDNServer:
                         raw_param = bytes(app_param)
                     app_data = json.loads(raw_param.decode('utf-8'))
                     is_local_sidecar_interest = app_data.get('_origin') == 'grpc-sidecar'
-                    logger.info(
+                    logger.debug(
                         "inbound_interest source=%s name=%s app_param_len=%d",
                         "local_grpc_sidecar" if is_local_sidecar_interest else "external_interest",
                         name_str,
@@ -162,7 +162,7 @@ class NDNServer:
                     )
 
                     req_bytes = encode_pull_log_entry_request(req_lite)
-                    logger.info(
+                    logger.debug(
                         "gRPC bridge: Sending PullLogEntries to %s via %s (%d bytes)",
                         self.grpc_client.server_address,
                         _JRAFT_PULL_LOG_METHOD,
@@ -182,12 +182,12 @@ class NDNServer:
                         ch.close()
 
                     data = decode_pull_log_entry_response(resp_bytes)
-                    logger.info(
+                    logger.debug(
                         "gRPC bridge: Received PullLogEntryResponse: success=%s term=%s",
                         data.get('success'), data.get('term'),
                     )
                     content = json.dumps(data).encode()
-                    logger.info(
+                    logger.debug(
                         "gRPC bridge: Converted PullLogEntryResponse to Data content, length: %d bytes",
                         len(content),
                     )
@@ -266,8 +266,17 @@ class NDNServer:
                 logger.debug(f"Interest {name_str} not in bridge prefixes, ignoring")
                 return
 
-            logger.info(f"Processing Interest with gRPC bridge: {name_str}")
+            logger.debug(f"Processing Interest with gRPC bridge: {name_str}")
             freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+
+            # Warn when all workers are busy — indicates JRaft backpressure.
+            queued = self._bridge_executor._work_queue.qsize()
+            active = self._bridge_executor._threads.__len__() if hasattr(self._bridge_executor, '_threads') else 0
+            if queued > 0:
+                logger.warning(
+                    "ndn_bridge thread pool busy: queued=%d active_threads=%d (max=%d) interest=%s",
+                    queued, active, _BRIDGE_THREAD_POOL_SIZE, name_str,
+                )
 
             def _in_thread():
                 try:
@@ -279,7 +288,7 @@ class NDNServer:
                         'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}
                     }).encode()
 
-                logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
+                logger.debug(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
                 # call_soon_threadsafe schedules put_data on the event loop thread —
                 # never call python-ndn APIs directly from a worker thread.
                 loop.call_soon_threadsafe(

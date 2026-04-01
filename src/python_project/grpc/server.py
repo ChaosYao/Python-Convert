@@ -128,15 +128,15 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 inbound_peer = context.peer()
             except Exception:
                 inbound_peer = "unknown"
-            logger.info(
+            logger.debug(
                 "transparent_passthrough inbound: peer=%s method=%s request_bytes=%d",
                 inbound_peer,
                 method,
                 len(request_bytes),
             )
             if is_jraft_pull:
-                logger.info(
-                    "transparent_passthrough jraft_branch: kind=pull_log_ndn (NDN path, no grpc outbound); method=%s",
+                logger.debug(
+                    "transparent_passthrough jraft_branch: kind=pull_log_ndn method=%s",
                     method,
                 )
                 # Convert PullLogEntryRequest -> NDN Interest -> PullLogEntryResponse (protobuf bytes)
@@ -194,7 +194,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
 
             # RequestVote, AppendEntries, InstallSnapshot, etc. use this branch (not PullLogEntry).
             if is_jraft_call:
-                logger.info(
+                logger.debug(
                     "transparent_passthrough jraft_branch: kind=forward_rpc method=%s",
                     method,
                 )
@@ -216,7 +216,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                         target = f"{host}:{peer_sidecar_port}"
                     else:
                         target = derived
-                    logger.info(
+                    logger.debug(
                         "Derived forward target from peer_id: %s -> %s (peer_sidecar_port=%d, method=%s)",
                         derived, target, peer_sidecar_port, method,
                     )
@@ -235,11 +235,10 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
             resolved_target = target
             target = rewrite_target_to_localhost_if_self(target)
             target = self._coerce_forward_target_away_from_self_listen(target, method)
-            logger.info(
-                "transparent_passthrough route: resolved_target=%s forward_target=%s local_identities=%s method=%s",
+            logger.debug(
+                "transparent_passthrough route: resolved_target=%s forward_target=%s method=%s",
                 resolved_target,
                 target,
-                collect_local_identity_hosts(),
                 method,
             )
 
@@ -250,9 +249,8 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     request_serializer=lambda b: b,
                     response_deserializer=lambda b: b,
                 )
-                logger.info(
-                    "transparent_passthrough outbound_begin: forward_target=%s method=%s timeout_sec=%.2f (awaiting response; "
-                    "if this line exists but no outbound_ok/outbound_fail, remote is slow or hung)",
+                logger.debug(
+                    "transparent_passthrough outbound_begin: forward_target=%s method=%s timeout_sec=%.2f",
                     target,
                     method,
                     self._forward_timeout_sec,
@@ -266,7 +264,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     timeout=self._forward_timeout_sec + 0.5,
                 )
                 await channel.close()
-                logger.info(
+                logger.debug(
                     "transparent_passthrough outbound_ok: forward_target=%s method=%s response_bytes=%d",
                     target,
                     method,
@@ -340,11 +338,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 context.set_details(str(e))
                 return b""
             finally:
-                logger.info(
-                    "transparent_passthrough outbound_finally: forward_target=%s method=%s",
-                    target,
-                    method,
-                )
+                pass
 
         return grpc.unary_unary_rpc_method_handler(
             unary_unary_passthrough,
@@ -461,7 +455,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         This method handles PullLogEntryRequest type requests by converting them to NDN Interest.
         Other request types should be handled by their respective RPC methods, which will call _forward_rpc().
         """
-        logger.info(
+        logger.debug(
             "inbound_grpc PullLogEntries: group_id=%s server_id=%s peer_id=%s term=%s",
             request.group_id,
             request.server_id,
@@ -493,7 +487,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
-        logger.info(f"Converting PullLogEntries to Interest: {interest_name}, content length: {len(request_content)}")
+        logger.debug(f"Converting PullLogEntries to Interest: {interest_name}")
         
         try:
             client_config = self.config.get_client_config()
@@ -524,14 +518,14 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             )
             
             _ndn_queue.put(interest_request)
-            logger.info(f"Interest request added to queue: {interest_name}")
+            logger.debug(f"Interest request added to queue: {interest_name}")
             
             timeout = (interest_lifetime / 1000) + 60
             content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
             
             if content:
                 response = data_content_to_pull_log_entry_response(content)
-                logger.info(f"Received Data from NDN, converted to PullLogEntryResponse: success={response.success}, term={response.term}")
+                logger.debug(f"Received Data from NDN: success={response.success}, term={response.term}")
                 return response
             else:
                 logger.warning("No Data received from NDN")
@@ -625,7 +619,7 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
             while True:
                 try:
                     request = await asyncio.to_thread(_ndn_queue.get)
-                    logger.info(f"Processing interest from queue: {request.interest_name}")
+                    logger.debug(f"Processing interest from queue: {request.interest_name}")
                     
                     try:
                         content = await _ndn_client.express_interest_with_params(

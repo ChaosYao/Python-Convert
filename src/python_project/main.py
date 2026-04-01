@@ -60,6 +60,20 @@ def run_sidecar(config_path: Optional[str] = None):
             ndn_init_done.set()
 
             async def after_nfd_connected():
+                # Catch all unhandled Task exceptions so they appear in logs
+                # instead of being silently swallowed by asyncio.
+                loop = asyncio.get_running_loop()
+                def _loop_exception_handler(loop, context):
+                    exc = context.get('exception')
+                    msg = context.get('message', '')
+                    logger.error(
+                        "NDN event-loop unhandled exception: %s%s",
+                        msg,
+                        f" — {exc}" if exc else "",
+                        exc_info=exc,
+                    )
+                loop.set_exception_handler(_loop_exception_handler)
+
                 ok = await ndn_server.register_route(route_prefix)
                 if not ok:
                     logger.error(
@@ -69,6 +83,14 @@ def run_sidecar(config_path: Optional[str] = None):
 
             # Register AFTER the connection to NFD is established, and get an explicit True/False.
             ndn_server.app.run_forever(after_start=after_nfd_connected())
+            # run_forever() returned — this means the NDN app disconnected from NFD.
+            # The face and all FIB entries are now gone.  Log prominently so it shows
+            # up in sidecar logs even when no exception was raised.
+            logger.error(
+                "NDN run_forever() EXITED (no exception) — face lost, prefix /%s unregistered. "
+                "This is the root cause of FIB entry disappearing.",
+                route_prefix,
+            )
         except Exception as e:
             ndn_init_done.set()
             logger.error("=" * 50)
