@@ -166,8 +166,13 @@ class NDNServer:
                     # Encode as sofa-jraft proto2 bytes and call JRaft via /_call.
                     # sofa-jraft does NOT expose grpc.SimpleService; it uses a
                     # dynamic registry where each request class maps to /_call.
-                    # grpc.aio is used so the await yields control back to the
-                    # event loop during the network round-trip (no blocking).
+                    #
+                    # run_in_executor() runs the blocking gRPC call in a thread-pool
+                    # worker, so the asyncio event loop is NEVER stalled while waiting
+                    # for JRaft to respond.  This keeps python-ndn's NFD heartbeat alive
+                    # and prevents the FIB entry from being removed (NACK 150).
+                    # grpc.aio is intentionally avoided here: it conflicts with an
+                    # externally-managed asyncio loop and can cause its own stalls.
                     req_bytes = encode_pull_log_entry_request(req_lite)
                     logger.info(
                         "gRPC bridge: Sending PullLogEntries to %s via %s (%d bytes)",
@@ -175,17 +180,22 @@ class NDNServer:
                         _JRAFT_PULL_LOG_METHOD,
                         len(req_bytes),
                     )
-                    import grpc.aio as _grpc_aio
-                    channel = _grpc_aio.insecure_channel(self.grpc_client.server_address)
-                    try:
-                        call = channel.unary_unary(
-                            _JRAFT_PULL_LOG_METHOD,
-                            request_serializer=lambda b: b,
-                            response_deserializer=lambda b: b,
-                        )
-                        resp_bytes = await call(req_bytes)
-                    finally:
-                        await channel.close()
+                    import grpc as _grpc
+
+                    def _blocking_grpc_call() -> bytes:
+                        ch = _grpc.insecure_channel(self.grpc_client.server_address)
+                        try:
+                            stub = ch.unary_unary(
+                                _JRAFT_PULL_LOG_METHOD,
+                                request_serializer=lambda b: b,
+                                response_deserializer=lambda b: b,
+                            )
+                            return stub(req_bytes)
+                        finally:
+                            ch.close()
+
+                    loop = asyncio.get_event_loop()
+                    resp_bytes = await loop.run_in_executor(None, _blocking_grpc_call)
 
                     # Decode proto2 response → JSON-compatible dict → NDN Data content
                     data = decode_pull_log_entry_response(resp_bytes)
