@@ -17,6 +17,26 @@ ndn:
   # Leave empty to use default: ~/.ndn/ndnsec-key-file
   tpm_path: /root/.ndn/ndnsec-key-file
 
+  # Peer sidecar NDN endpoints.
+  # For each remote raft node, register a persistent UDP face and a FIB route
+  # so that Interests for /raft/<peer> are forwarded without on-demand face
+  # timeout (NACK 150 NoRoute).
+  # - prefix:  NDN name prefix owned by that peer (matches its route_prefix)
+  # - address: UDP URI of the peer's NFD (udp4://<host>:6363)
+  # Override at deploy time via environment peers or K8s configmap.
+  peers: []
+  # Example for a 3-node raft-demo cluster:
+  # peers:
+  #   - prefix: /raft/raft-0
+  #     address: udp4://raft-0.raft-demo.svc.cluster.local:6363
+  #   - prefix: /raft/raft-1
+  #     address: udp4://raft-1.raft-demo.svc.cluster.local:6363
+  #   - prefix: /raft/raft-2
+  #     address: udp4://raft-2.raft-demo.svc.cluster.local:6363
+
+  # How often (seconds) to refresh peer faces/routes (guards against NFD restart).
+  face_refresh_interval: 60
+
 # Server-specific configuration
 server:
   # Routes to register (list of prefixes)

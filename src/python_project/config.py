@@ -165,6 +165,21 @@ class Config:
             return host
         return 'localhost:19090'
 
+    def get_ndn_peers(self) -> list:
+        """
+        Return list of peer NDN endpoints for persistent face/route setup.
+        Each item: {'prefix': '/raft/raft-1', 'address': 'udp4://host:6363'}
+        """
+        peers = self._config.get('ndn', {}).get('peers', [])
+        return peers if isinstance(peers, list) else []
+
+    def get_ndn_face_refresh_interval(self) -> int:
+        """Seconds between peer face/route refresh cycles (guards against NFD restart)."""
+        v = self._config.get('ndn', {}).get('face_refresh_interval')
+        if v is not None:
+            return int(v)
+        return int(os.getenv('NDN_FACE_REFRESH_INTERVAL', '60'))
+
     def get_grpc_upstream_raft_addr(self) -> str:
         """
         Same-pod JRaft gRPC (Java), bypassing this sidecar's listen port.

@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Optional
 from ndn.app import NDNApp
 from ndn.encoding import Name, FormalName, InterestParam
@@ -12,6 +13,7 @@ from ndn.security import KeychainSqlite3, TpmFile
 from ..config import get_config
 from ..grpc.client import SimpleClient
 from ..grpc import bidirectional_pb2_grpc
+from ..utils import extract_host_from_server_id, get_hostname
 from ..grpc.jraft_codec import (
     PullLogEntryRequestLite,
     encode_pull_log_entry_request,
@@ -295,10 +297,92 @@ class NDNServer:
             )
         return ok
     
+    # ------------------------------------------------------------------
+    # Persistent face / route management
+    # ------------------------------------------------------------------
+
+    async def _nfdc(self, *args: str) -> str:
+        """Run an nfdc command and return stdout. Errors are logged, not raised."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'nfdc', *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            out = stdout.decode(errors='replace').strip()
+            err = stderr.decode(errors='replace').strip()
+            if proc.returncode != 0:
+                logger.warning("nfdc %s returned %d: %s", ' '.join(args), proc.returncode, err or out)
+            return out
+        except asyncio.TimeoutError:
+            logger.error("nfdc %s timed out", ' '.join(args))
+            return ''
+        except FileNotFoundError:
+            logger.error("nfdc not found in PATH; cannot manage NDN faces")
+            return ''
+        except Exception as e:
+            logger.error("nfdc %s error: %s", ' '.join(args), e)
+            return ''
+
+    async def _ensure_persistent_face(self, uri: str) -> Optional[int]:
+        """
+        Create (or update) a persistent face to uri.
+        Returns the face_id on success, None on failure.
+        nfdc prints 'face-created id=N ...' or 'face-updated id=N ...'.
+        """
+        out = await self._nfdc('face', 'create', uri, 'persistency', 'persistent')
+        m = re.search(r'\bid=(\d+)\b', out)
+        if m:
+            return int(m.group(1))
+        logger.error("Could not parse face id from nfdc output: %r", out)
+        return None
+
+    async def _ensure_route(self, prefix: str, face_id: int) -> None:
+        """Add (or refresh) a FIB route prefix -> face_id."""
+        await self._nfdc('route', 'add', prefix, str(face_id))
+
+    async def setup_peer_faces(self) -> None:
+        """
+        Create persistent faces and FIB routes to all configured peers.
+
+        Skips the local node (avoids adding a loopback face for self).
+        Safe to call repeatedly; nfdc face create is idempotent
+        (returns 'face-updated' if the face already exists).
+        """
+        peers = self.config.get_ndn_peers()
+        if not peers:
+            logger.debug("No NDN peers configured; skipping face setup")
+            return
+
+        local_host = extract_host_from_server_id(get_hostname())
+        for peer in peers:
+            prefix = peer.get('prefix', '').strip()
+            address = peer.get('address', '').strip()
+            if not prefix or not address:
+                logger.warning("Skipping invalid peer entry: %r", peer)
+                continue
+            peer_host = extract_host_from_server_id(prefix)
+            if peer_host == local_host:
+                logger.debug("Skipping self peer: %s", prefix)
+                continue
+            try:
+                face_id = await self._ensure_persistent_face(address)
+                if face_id is not None:
+                    await self._ensure_route(prefix, face_id)
+                    logger.info(
+                        "NDN peer face ready: prefix=%s address=%s face_id=%d",
+                        prefix, address, face_id,
+                    )
+                else:
+                    logger.warning("Failed to create face for peer %s at %s", prefix, address)
+            except Exception as e:
+                logger.error("setup_peer_faces error for %s: %s", prefix, e, exc_info=True)
+
     async def run(self, after_start=None):
         logger.info("Starting NDN server...")
         await self.app.run_forever(after_start=after_start)
-    
+
     def shutdown(self):
         if self.grpc_client:
             self.grpc_client.disconnect()
