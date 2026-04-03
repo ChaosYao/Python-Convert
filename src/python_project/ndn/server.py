@@ -54,6 +54,11 @@ class NDNServer:
     ):
         self.config = get_config(config_path)
 
+        # Kept so shutdown() can explicitly close the SQLite connection in the
+        # correct thread, avoiding sqlite3.ProgrammingError from GC running in
+        # a different thread when the restart loop creates a fresh NDNServer.
+        self._keychain: Optional[KeychainSqlite3] = None
+
         if app is not None:
             self.app = app
         else:
@@ -92,6 +97,7 @@ class NDNServer:
 
                 try:
                     keychain = KeychainSqlite3(pib_path, tpm)
+                    self._keychain = keychain  # saved for explicit close in shutdown()
                     self.app = NDNApp(keychain=keychain)
                     logger.info(f"Using custom PIB path: {pib_path}")
                     if tpm_path:
@@ -220,17 +226,20 @@ class NDNServer:
                     else:
                         logger.debug("grpc_call_ok: name=%s elapsed=%.3fs", name_str, elapsed)
 
-                    data = decode_pull_log_entry_response(resp_bytes)
-                    logger.debug(
-                        "gRPC bridge: Received PullLogEntryResponse: success=%s term=%s",
-                        data.get('success'), data.get('term'),
-                    )
-                    content = json.dumps(data).encode()
-                    logger.debug(
-                        "gRPC bridge: Converted PullLogEntryResponse to Data content, length: %d bytes",
-                        len(content),
-                    )
-                    return content
+                    # Log response details at DEBUG level (decode only for logging).
+                    if logger.isEnabledFor(logging.DEBUG):
+                        data = decode_pull_log_entry_response(resp_bytes)
+                        logger.debug(
+                            "gRPC bridge: PullLogEntryResponse: success=%s term=%s proto_bytes=%d",
+                            data.get('success'), data.get('term'), len(resp_bytes),
+                        )
+
+                    # Pass raw protobuf bytes directly as NDN Data content.
+                    # Previously we decoded to JSON then re-encoded on the client side,
+                    # which inflated binary fields via base64 and easily exceeded NFD's
+                    # 8800-byte packet limit, causing Broken Pipe face closures.
+                    # Protobuf is already the exact bytes JRaft needs; no conversion required.
+                    return resp_bytes
 
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     logger.error(f"gRPC bridge: Failed to parse app_param: {e}")
@@ -284,7 +293,9 @@ class NDNServer:
 
             # Yield after each Data packet so the event loop can service NFD
             # socket I/O (keepalive, incoming Interests) between sends.
-            await asyncio.sleep(0)
+            # 2 ms gap: gives NFD enough time to drain its receive buffer before
+            # the next packet arrives, preventing Broken Pipe under burst load.
+            await asyncio.sleep(0.002)
 
     async def register_route(self, prefix: str, use_grpc_bridge: Optional[bool] = None) -> bool:
         """
@@ -487,3 +498,13 @@ class NDNServer:
             logger.info("gRPC client disconnected")
         if self.app:
             self.app.shutdown()
+        # Explicitly close the SQLite keychain connection in the thread that
+        # created it (the NDN server thread).  Without this, Python's GC may
+        # call KeychainSqlite3.__del__ → conn.close() in a different thread,
+        # which raises sqlite3.ProgrammingError on every restart-loop iteration.
+        if self._keychain is not None:
+            try:
+                self._keychain.shutdown()
+            except Exception:
+                pass
+            self._keychain = None

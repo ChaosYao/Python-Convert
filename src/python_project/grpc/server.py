@@ -184,12 +184,9 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     context.set_details("No response from NDN")
                     return b""
 
-                try:
-                    return encode_pull_log_entry_response_from_ndn_content(content)
-                except Exception as e:
-                    context.set_code(grpc.StatusCode.INTERNAL)
-                    context.set_details(f"Failed to encode PullLogEntryResponse: {e}")
-                    return b""
+                # NDN Data content is now raw protobuf bytes (no JSON intermediate).
+                # Return directly — the gRPC framework adds the length-prefix frame.
+                return content
 
             # RequestVote, AppendEntries, InstallSnapshot, etc. use this branch (not PullLogEntry).
             if is_jraft_call:
