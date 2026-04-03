@@ -184,7 +184,7 @@ def rewrite_target_to_localhost_if_self(target: str) -> str:
     for local in identities:
         if _target_host_refers_to_local(h, local):
             out = f"localhost:{port}" if port else "localhost"
-            logger.info(
+            logger.debug(
                 "localhost_rewrite_check: MATCH target_host=%r port=%r identities=%r matched_identity=%r -> %r",
                 h,
                 port,

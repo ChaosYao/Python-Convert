@@ -93,9 +93,8 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
         if hl not in ("localhost", "127.0.0.1", "::1"):
             return target
         upstream = self.config.get_grpc_upstream_raft_addr()
-        logger.warning(
-            "transparent_passthrough loop_guard: would dial sidecar listen (%s) for %s; using upstream_raft=%s",
-            target,
+        logger.debug(
+            "transparent_passthrough loop_guard: self-addressed %s → upstream_raft=%s",
             method,
             upstream,
         )
