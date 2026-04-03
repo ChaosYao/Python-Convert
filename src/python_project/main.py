@@ -174,7 +174,9 @@ def run_sidecar(config_path: Optional[str] = None):
         logger.error(f"gRPC Server error: {e}", exc_info=True)
         logger.error("Container will keep running for debugging...")
         # Keep container alive for debugging
-        import time
+        # NOTE: do NOT write "import time" here — it would shadow the module-level
+        # import and create a closure cell variable that breaks time.sleep() inside
+        # the nested run_ndn_server_thread() function with NameError.
         while True:
             time.sleep(60)
             logger.info("Container still running... (Ctrl+C to exit)")
@@ -213,8 +215,7 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         logger.error("Container will keep running for debugging...")
-        # Keep container alive for debugging
-        import time
+        # Keep container alive for debugging (time is imported at module level)
         while True:
             time.sleep(60)
             logger.info("Container still running... (Ctrl+C to exit)")

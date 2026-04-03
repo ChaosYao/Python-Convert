@@ -3,9 +3,14 @@ import asyncio
 import json
 import logging
 import os
+import queue as _queue
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+import grpc
+
 from ndn.app import NDNApp
 from ndn.encoding import Name, FormalName, InterestParam
 from ndn.security import KeychainSqlite3, TpmFile
@@ -30,6 +35,11 @@ _JRAFT_PULL_LOG_METHOD = (
 # Each worker thread handles one blocking gRPC call; keeping this bounded
 # prevents overwhelming JRaft with too many simultaneous connections.
 _BRIDGE_THREAD_POOL_SIZE = 4
+
+# Timeout for each blocking gRPC call to JRaft.
+# Under heavy write load the leader can be slow; cap the wait so worker
+# threads are released promptly and the Interest pipeline stays moving.
+_GRPC_CALL_TIMEOUT_SEC = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -99,34 +109,55 @@ class NDNServer:
         # directly, NOT the sidecar's own listen port (19090).  Calling the sidecar would
         # cause a loop: sidecar -> NDN Interest -> NDN server -> sidecar -> NDN Interest -> ...
         self.grpc_client: Optional[SimpleClient] = None
+        # Persistent gRPC channel shared by all worker threads.
+        # gRPC channels are thread-safe; reusing one channel eliminates the TCP
+        # connection setup overhead that occurred with per-request channel creation.
+        self._grpc_channel: Optional[grpc.Channel] = None
+        self._pull_log_stub = None
+
         if self.config.get_ndn_server_use_grpc():
             grpc_host = self.config.get_grpc_upstream_raft_addr()
             self.grpc_client = SimpleClient(server_address=grpc_host, config_path=config_path)
             self.grpc_client.connect()
+            self._grpc_channel = grpc.insecure_channel(grpc_host)
+            self._pull_log_stub = self._grpc_channel.unary_unary(
+                _JRAFT_PULL_LOG_METHOD,
+                request_serializer=lambda b: b,
+                response_deserializer=lambda b: b,
+            )
             logger.info(f"gRPC client initialized for bridge (upstream JRaft): {grpc_host}")
 
         # Thread pool for blocking gRPC calls.
-        # Runs _grpc_bridge_handler in worker threads so the asyncio event loop
-        # (and therefore the NFD face / heartbeat) is never stalled.
-        # put_data is always called back on the event loop via call_soon_threadsafe.
+        # Worker threads make gRPC calls completely off the asyncio event loop,
+        # then push completed (name, content) pairs into _result_queue.
+        # The _drain_results() coroutine on the NDN event loop drains the queue
+        # with an asyncio.sleep(0) yield between each put_data call, ensuring
+        # the NFD face I/O is never starved by a burst of Data packets.
         self._bridge_executor = ThreadPoolExecutor(
             max_workers=_BRIDGE_THREAD_POOL_SIZE,
             thread_name_prefix="ndn-bridge",
         )
 
+        # Thread-safe queue: worker threads push (name, content, freshness_period);
+        # the NDN event loop drains it via _drain_results().
+        self._result_queue: _queue.SimpleQueue = _queue.SimpleQueue()
+
+        # asyncio Task for the drain loop; kept so it can be cancelled on shutdown.
+        self._drain_task: Optional[asyncio.Task] = None
+
     def _grpc_bridge_handler(self, name: FormalName, param: InterestParam, app_param: bytes) -> bytes:
         """
         Bridge an NDN Interest to a gRPC call and return the response bytes.
 
-        This is a plain synchronous method — it runs inside a ThreadPoolExecutor
-        worker, completely off the asyncio event loop.  That keeps the event loop
-        free to maintain the NFD face heartbeat at all times.
+        Runs inside a ThreadPoolExecutor worker — completely off the asyncio
+        event loop.  Uses a persistent gRPC channel (thread-safe) to avoid
+        TCP connection setup overhead on every request.
         """
         name_str = Name.to_str(name)
         logger.debug(f"gRPC bridge: Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
 
-        if self.grpc_client is None:
-            error_msg = "gRPC client not initialized"
+        if self._pull_log_stub is None:
+            error_msg = "gRPC stub not initialized"
             logger.error(error_msg)
             return f"Error: {error_msg}".encode()
 
@@ -169,17 +200,25 @@ class NDNServer:
                         len(req_bytes),
                     )
 
-                    import grpc as _grpc
-                    ch = _grpc.insecure_channel(self.grpc_client.server_address)
+                    t0 = time.monotonic()
                     try:
-                        stub = ch.unary_unary(
-                            _JRAFT_PULL_LOG_METHOD,
-                            request_serializer=lambda b: b,
-                            response_deserializer=lambda b: b,
+                        resp_bytes = self._pull_log_stub(req_bytes, timeout=_GRPC_CALL_TIMEOUT_SEC)
+                    except grpc.RpcError as e:
+                        elapsed = time.monotonic() - t0
+                        logger.error(
+                            "grpc_call_failed: name=%s elapsed=%.2fs status=%s details=%s",
+                            name_str, elapsed, e.code(), e.details(),
                         )
-                        resp_bytes = stub(req_bytes)
-                    finally:
-                        ch.close()
+                        raise
+                    elapsed = time.monotonic() - t0
+                    if elapsed > 1.0:
+                        logger.warning(
+                            "slow_grpc_call: name=%s elapsed=%.2fs (threshold=1s) "
+                            "— JRaft may be under write load",
+                            name_str, elapsed,
+                        )
+                    else:
+                        logger.debug("grpc_call_ok: name=%s elapsed=%.3fs", name_str, elapsed)
 
                     data = decode_pull_log_entry_response(resp_bytes)
                     logger.debug(
@@ -209,6 +248,43 @@ class NDNServer:
         except Exception as e:
             logger.error(f"gRPC bridge error: {e}", exc_info=True)
             return json.dumps({'success': False, 'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}}).encode()
+
+    async def _drain_results(self) -> None:
+        """
+        Drain the gRPC result queue on the NDN event loop.
+
+        Worker threads push (name, content, freshness_period) tuples into
+        _result_queue after completing their gRPC calls.  This coroutine
+        continuously drains that queue and calls put_data for each result.
+
+        Isolation mechanism:
+        - Between each put_data call, 'await asyncio.sleep(0)' yields control
+          back to the event loop so NFD socket I/O (face keepalive, incoming
+          Interests) is never starved by a burst of outgoing Data packets.
+        - When the queue is empty a short sleep (1 ms) avoids a busy-spin while
+          keeping response latency negligible.
+        """
+        logger.info("NDN result drain loop started")
+        while True:
+            try:
+                name, content, freshness_period = self._result_queue.get_nowait()
+            except _queue.Empty:
+                # Queue empty — yield and poll again after 1 ms
+                await asyncio.sleep(0.001)
+                continue
+
+            try:
+                self.app.put_data(name, content=content, freshness_period=freshness_period)
+                logger.debug("put_data ok: %s (%d bytes)", Name.to_str(name), len(content))
+            except Exception as e:
+                logger.error(
+                    "put_data FAILED for %s — Interest will timeout: %s",
+                    Name.to_str(name), e, exc_info=True,
+                )
+
+            # Yield after each Data packet so the event loop can service NFD
+            # socket I/O (keepalive, incoming Interests) between sends.
+            await asyncio.sleep(0)
 
     async def register_route(self, prefix: str, use_grpc_bridge: Optional[bool] = None) -> bool:
         """
@@ -253,12 +329,16 @@ class NDNServer:
 
         bridge_prefixes = self.config.get_ndn_server_grpc_bridge_prefixes()
 
-        # Capture the running loop here (register_route runs inside run_forever's loop).
-        # Worker threads use this reference to schedule put_data back on the event loop
-        # via call_soon_threadsafe — the only thread-safe way to call python-ndn APIs.
-        loop = asyncio.get_running_loop()
-
         def grpc_bridge_handler(name: FormalName, param: InterestParam, app_param: bytes):
+            """
+            NDN Interest handler — runs on the event loop, must return immediately.
+
+            Submits work to the thread pool and returns.  The worker thread makes
+            the blocking gRPC call and pushes the result into _result_queue.
+            The _drain_results() coroutine (also on this event loop) picks it up
+            and calls put_data with asyncio.sleep(0) yields in between, so the
+            NFD face I/O is never blocked by a burst of Data packets.
+            """
             name_str = Name.to_str(name)
 
             in_bridge_prefixes = (not bridge_prefixes) or any(name_str.startswith(bp) for bp in bridge_prefixes)
@@ -288,22 +368,11 @@ class NDNServer:
                         'errorResponse': {'errorCode': 3, 'errorMsg': str(e)}
                     }).encode()
 
-                logger.debug(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
-
-                # call_soon_threadsafe schedules put_data on the event loop thread —
-                # never call python-ndn APIs directly from a worker thread.
-                # Wrap in try/except so any exception from put_data is surfaced
-                # explicitly instead of being swallowed by asyncio's callback handler.
-                def _put_data_safe():
-                    try:
-                        self.app.put_data(name, content=content, freshness_period=freshness_period)
-                    except Exception as e:
-                        logger.error(
-                            "put_data FAILED for %s — this may cause NDN app to disconnect: %s",
-                            name_str, e, exc_info=True,
-                        )
-
-                loop.call_soon_threadsafe(_put_data_safe)
+                # Push result to queue — the drain coroutine calls put_data on
+                # the event loop with inter-packet yields for face health.
+                # Never call python-ndn APIs (put_data, etc.) from a worker thread.
+                self._result_queue.put((name, content, freshness_period))
+                logger.debug(f"Result queued for: {name_str}, {len(content)} bytes")
 
             self._bridge_executor.submit(_in_thread)
 
@@ -315,6 +384,11 @@ class NDNServer:
 
         if ok:
             logger.info(f"Registered route to NFD: {prefix} (mode: gRPC bridge - NDN -> gRPC)")
+            # Start the drain loop as a long-running task on this event loop.
+            # One drain task handles all prefixes; only start it once.
+            if self._drain_task is None or self._drain_task.done():
+                self._drain_task = asyncio.ensure_future(self._drain_results())
+                logger.info("NDN result drain loop task created")
         else:
             logger.error(
                 f"Route registration to NFD returned False for prefix: {prefix}. "
@@ -397,7 +471,17 @@ class NDNServer:
         await self.app.run_forever(after_start=after_start)
 
     def shutdown(self):
+        # Cancel the drain task first so no more put_data calls are made
+        if self._drain_task is not None and not self._drain_task.done():
+            self._drain_task.cancel()
+            logger.info("NDN result drain task cancelled")
         self._bridge_executor.shutdown(wait=False)
+        if self._grpc_channel is not None:
+            try:
+                self._grpc_channel.close()
+            except Exception:
+                pass
+            logger.info("gRPC channel closed")
         if self.grpc_client:
             self.grpc_client.disconnect()
             logger.info("gRPC client disconnected")
