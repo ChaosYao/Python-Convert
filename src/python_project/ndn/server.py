@@ -23,6 +23,7 @@ from ..grpc.jraft_codec import (
     PullLogEntryRequestLite,
     encode_pull_log_entry_request,
     decode_pull_log_entry_response,
+    encode_pull_log_entry_response_from_ndn_content,
 )
 
 # sofa-jraft gRPC method path for PullLogEntryRequest.
@@ -40,6 +41,14 @@ _BRIDGE_THREAD_POOL_SIZE = 4
 # Under heavy write load the leader can be slow; cap the wait so worker
 # threads are released promptly and the Interest pipeline stays moving.
 _GRPC_CALL_TIMEOUT_SEC = 5.0
+
+# Maximum bytes of protobuf content that can safely fit in one NDN Data packet.
+# NDN's hard limit is 8800 bytes total; subtract ~400 bytes for Name/MetaInfo/
+# SignatureInfo overhead.  If a PullLogEntryResponse exceeds this we trim entries
+# so the packet stays under the limit — JRaft fetches remaining entries on the
+# next PullLogEntryRequest.  This prevents NFD from closing the face with
+# BrokenPipeError when it receives an oversized packet.
+_NDN_MAX_CONTENT_BYTES = 8000
 
 logger = logging.getLogger(__name__)
 
@@ -226,20 +235,46 @@ class NDNServer:
                     else:
                         logger.debug("grpc_call_ok: name=%s elapsed=%.3fs", name_str, elapsed)
 
-                    # Log response details at DEBUG level (decode only for logging).
-                    if logger.isEnabledFor(logging.DEBUG):
-                        data = decode_pull_log_entry_response(resp_bytes)
+                    # Guard against oversized NDN packets.
+                    # NFD silently closes the face when it receives a packet larger
+                    # than 8800 bytes, producing BrokenPipeError with no other hint.
+                    # If the raw protobuf fits, pass it straight through (fast path).
+                    # If it's too large (many log entries, large values), decode it,
+                    # drop trailing entries until it fits, and re-encode.  JRaft will
+                    # request the remaining entries with the next PullLogEntryRequest.
+                    if len(resp_bytes) <= _NDN_MAX_CONTENT_BYTES:
                         logger.debug(
-                            "gRPC bridge: PullLogEntryResponse: success=%s term=%s proto_bytes=%d",
-                            data.get('success'), data.get('term'), len(resp_bytes),
+                            "gRPC bridge: PullLogEntryResponse proto_bytes=%d (fits)",
+                            len(resp_bytes),
                         )
+                        return resp_bytes
 
-                    # Pass raw protobuf bytes directly as NDN Data content.
-                    # Previously we decoded to JSON then re-encoded on the client side,
-                    # which inflated binary fields via base64 and easily exceeded NFD's
-                    # 8800-byte packet limit, causing Broken Pipe face closures.
-                    # Protobuf is already the exact bytes JRaft needs; no conversion required.
-                    return resp_bytes
+                    # Slow path: trim entries to fit.
+                    data = decode_pull_log_entry_response(resp_bytes)
+                    entries = data.get('entries', [])
+                    original_count = len(entries)
+                    # Binary-search for the largest prefix of entries that fits.
+                    lo, hi = 1, len(entries)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        data['entries'] = entries[:mid]
+                        candidate = encode_pull_log_entry_response_from_ndn_content(
+                            json.dumps(data).encode()
+                        )
+                        if len(candidate) <= _NDN_MAX_CONTENT_BYTES:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    data['entries'] = entries[:lo]
+                    trimmed_bytes = encode_pull_log_entry_response_from_ndn_content(
+                        json.dumps(data).encode()
+                    )
+                    logger.warning(
+                        "ndn_packet_trimmed: name=%s original_bytes=%d entries=%d→%d "
+                        "trimmed_bytes=%d — JRaft will fetch remaining entries next pull",
+                        name_str, len(resp_bytes), original_count, lo, len(trimmed_bytes),
+                    )
+                    return trimmed_bytes
 
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     logger.error(f"gRPC bridge: Failed to parse app_param: {e}")

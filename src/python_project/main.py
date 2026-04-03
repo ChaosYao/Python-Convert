@@ -50,102 +50,61 @@ def run_sidecar(config_path: Optional[str] = None):
     ndn_server_holder: dict[str, Optional[NDNServer]] = {"server": None}
     ndn_init_done = threading.Event()
 
-    _NDN_RESTART_DELAY_SEC = 3
-
     def run_ndn_server_thread():
-        """
-        Run NDN Server in a dedicated thread with automatic restart.
+        """Run NDN Server in a dedicated thread. No restart — the root cause
+        (oversized NDN packets / event-loop starvation) must be fixed instead."""
+        logger.info("NDN Server thread started")
+        ndn_server: Optional[NDNServer] = None
+        try:
+            ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+            ndn_server_holder["server"] = ndn_server
+            ndn_init_done.set()
+            logger.info("NDN Server initialized successfully")
 
-        python-ndn's run_forever() can return without raising an exception when
-        the NFD connection is lost (e.g. resource exhaustion from an iptables
-        redirect loop).  Without a restart loop the face and FIB entry are gone
-        permanently, causing all subsequent Interests to receive NACK 150.
+            async def after_nfd_connected():
+                loop = asyncio.get_running_loop()
+                def _loop_exception_handler(loop, context):
+                    exc = context.get('exception')
+                    msg = context.get('message', '')
+                    logger.error(
+                        "NDN event-loop unhandled exception: %s%s",
+                        msg,
+                        f" — {exc}" if exc else "",
+                        exc_info=exc,
+                    )
+                loop.set_exception_handler(_loop_exception_handler)
 
-        This loop re-creates the NDNServer and re-registers the prefix every
-        time run_forever() exits, giving the sidecar self-healing capability.
-        """
-        first_run = True
-        while True:
-            ndn_server: Optional[NDNServer] = None
-            try:
-                if first_run:
-                    logger.info("NDN Server thread started")
+                ok = await ndn_server.register_route(route_prefix)
+                if ok:
+                    logger.info("NDN route registered: %s", route_prefix)
                 else:
-                    logger.warning(
-                        "NDN Server restarting after disconnect (delay=%ds)", _NDN_RESTART_DELAY_SEC
+                    logger.error(
+                        "NDN prefix registration failed for %s. "
+                        "Check NFD authorization/trust schema and `nfdc route list`.",
+                        route_prefix,
                     )
 
-                ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+            ndn_server.app.run_forever(after_start=after_nfd_connected())
 
-                if first_run:
-                    ndn_server_holder["server"] = ndn_server
-                    ndn_init_done.set()
-                    logger.info("NDN Server initialized successfully")
+            # If we reach here, run_forever() exited without exception.
+            # This means NFD closed the connection — something sent an invalid
+            # packet (check for oversized_ndn_data warnings above this line).
+            logger.error(
+                "NDN run_forever() EXITED — NFD closed the connection. "
+                "prefix=%s is now unreachable. Check logs for oversized_ndn_data "
+                "warnings or slow_grpc_call warnings above this line.",
+                route_prefix,
+            )
 
-                async def after_nfd_connected():
-                    # Catch all unhandled Task exceptions so they appear in logs
-                    # instead of being silently swallowed by asyncio.
-                    loop = asyncio.get_running_loop()
-                    def _loop_exception_handler(loop, context):
-                        exc = context.get('exception')
-                        msg = context.get('message', '')
-                        logger.error(
-                            "NDN event-loop unhandled exception: %s%s",
-                            msg,
-                            f" — {exc}" if exc else "",
-                            exc_info=exc,
-                        )
-                    loop.set_exception_handler(_loop_exception_handler)
-
-                    ok = await ndn_server.register_route(route_prefix)
-                    if ok:
-                        logger.info("NDN route registered: %s", route_prefix)
-                    else:
-                        logger.error(
-                            "NDN prefix registration failed for %s. "
-                            "Check NFD authorization/trust schema and `nfdc route list`.",
-                            route_prefix,
-                        )
-
-                    # Periodic heartbeat: confirms the event loop is still running.
-                    # If heartbeat logs stop appearing before run_forever() exits,
-                    # the loop was blocked or stopped unexpectedly.
-                    async def _heartbeat():
-                        while True:
-                            await asyncio.sleep(10)
-                            pending = [t for t in asyncio.all_tasks() if not t.done()]
-                            logger.debug(
-                                "NDN event-loop heartbeat: alive prefix=%s pending_tasks=%d",
-                                route_prefix, len(pending),
-                            )
-                    asyncio.create_task(_heartbeat(), name="ndn-heartbeat")
-
-                ndn_server.app.run_forever(after_start=after_nfd_connected())
-
-                # run_forever() returned — NDN app disconnected from NFD.
-                # Face and FIB entries are now gone; the loop will restart.
-                queued = ndn_server._bridge_executor._work_queue.qsize()
-                active = len(ndn_server._bridge_executor._threads) \
-                    if hasattr(ndn_server._bridge_executor, '_threads') else -1
-                logger.error(
-                    "NDN run_forever() EXITED (no exception) — face lost, prefix %s unregistered. "
-                    "thread_pool: active=%d queued=%d. Restarting in %ds.",
-                    route_prefix, active, queued, _NDN_RESTART_DELAY_SEC,
-                )
-
-            except Exception as e:
-                if first_run:
-                    ndn_init_done.set()
-                logger.error("NDN Server error (will restart in %ds): %s", _NDN_RESTART_DELAY_SEC, e, exc_info=True)
-            finally:
-                if ndn_server:
-                    try:
-                        ndn_server.shutdown()
-                    except Exception:
-                        pass
-
-            first_run = False
-            time.sleep(_NDN_RESTART_DELAY_SEC)
+        except Exception as e:
+            ndn_init_done.set()  # unblock main thread even on failure
+            logger.error("NDN Server fatal error: %s", e, exc_info=True)
+        finally:
+            if ndn_server:
+                try:
+                    ndn_server.shutdown()
+                except Exception:
+                    pass
 
     ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
     ndn_server_thread.start()
