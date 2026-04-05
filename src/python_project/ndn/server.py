@@ -198,9 +198,21 @@ class NDNServer:
                         len(raw_param),
                     )
 
+                    # Restore a valid JRaft member ID for the server_id field.
+                    # Follower sidecars send server_id="follower" (a constant) so
+                    # that Interests from different followers at the same log position
+                    # are identical and can be aggregated by NFD.  JRaft requires a
+                    # valid cluster member here, so we substitute peer_id (this
+                    # node's own JRaft address, always a valid member).
+                    raw_server_id = app_data.get('server_id', '')
+                    effective_server_id = (
+                        app_data.get('peer_id', '')
+                        if raw_server_id == 'follower'
+                        else raw_server_id
+                    )
                     req_lite = PullLogEntryRequestLite(
                         group_id=app_data.get('group_id', ''),
-                        server_id=app_data.get('server_id', ''),
+                        server_id=effective_server_id,
                         peer_id=app_data.get('peer_id', ''),
                         term=app_data.get('term', 0),
                         prev_log_term=app_data.get('prev_log_term', 0),
@@ -430,6 +442,9 @@ class NDNServer:
 
         if ok:
             logger.info(f"Registered route to NFD: {prefix} (mode: gRPC bridge - NDN -> gRPC)")
+            # Promote our application face from on-demand to persistent so NFD
+            # does not remove it when it becomes idle between Interest bursts.
+            await self._set_app_face_persistent()
             # Start the drain loop as a long-running task on this event loop.
             # One drain task handles all prefixes; only start it once.
             if self._drain_task is None or self._drain_task.done():
@@ -446,6 +461,34 @@ class NDNServer:
     # ------------------------------------------------------------------
     # Persistent face / route management
     # ------------------------------------------------------------------
+
+    async def _set_app_face_persistent(self) -> None:
+        """
+        Change our application face from on-demand to persistent.
+
+        By default NFD creates local Unix-socket faces as on-demand, meaning
+        it may remove them when it considers them idle.  Switching to persistent
+        tells NFD to keep the face alive regardless of traffic levels.
+
+        We identify our own face by listing all faces whose local endpoint is
+        the NFD Unix socket and whose on-demand flag is set, then update each.
+        (In practice only one face per python-ndn process exists here.)
+        """
+        out = await self._nfdc('face', 'list')
+        for line in out.splitlines():
+            if 'unix:///run/nfd/nfd.sock' not in line:
+                continue
+            if 'on-demand' not in line:
+                continue
+            m = re.search(r'faceid=(\d+)', line)
+            if not m:
+                continue
+            face_id = m.group(1)
+            result = await self._nfdc('face', 'update', face_id, 'persistency', 'persistent')
+            logger.info(
+                "App face %s set to persistent (was on-demand): %s",
+                face_id, result.strip() or 'ok',
+            )
 
     async def _nfdc(self, *args: str) -> str:
         """Run an nfdc command and return stdout. Errors are logged, not raised."""

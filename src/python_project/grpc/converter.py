@@ -22,11 +22,17 @@ def pull_log_entry_request_to_interest_name(request) -> str:
 def pull_log_entry_request_to_data_content(request) -> bytes:
     """
     Convert PullLogEntryRequest to bytes for Interest app_param.
+
+    server_id identifies the requesting follower and is replaced with the
+    constant "follower" so that Interests from different followers with the
+    same log position become identical — enabling NFD Interest aggregation
+    and Content Store caching.  The leader sidecar restores a valid member
+    ID (peer_id) before forwarding to JRaft.
     """
     data = {
         '_origin': 'grpc-sidecar',
         'group_id': request.group_id,
-        'server_id': request.server_id,
+        'server_id': 'follower',
         'peer_id': request.peer_id,
         'term': request.term,
         'prev_log_term': request.prev_log_term,
