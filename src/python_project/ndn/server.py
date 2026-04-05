@@ -176,44 +176,40 @@ class NDNServer:
 
         try:
             if name_str.startswith("/raft/"):
-                if not app_param:
-                    logger.error("inbound_interest name=%s app_param missing", name_str)
-                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': 'app_param is required'}}).encode()
-
+                # Name format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
+                # All fields are in the name; no AppParameters are used, eliminating
+                # the params-sha256 component and enabling NFD Interest aggregation.
                 try:
-                    if isinstance(app_param, memoryview):
-                        raw_param = app_param.tobytes()
-                    elif isinstance(app_param, bytes):
-                        raw_param = app_param
-                    else:
-                        raw_param = bytes(app_param)
-                    app_data = json.loads(raw_param.decode('utf-8'))
+                    parts = name_str.split('/')
+                    # parts: ['', 'raft', short_host, 'pull', term, prev_log_term, prev_log_index]
+                    if len(parts) < 7 or parts[3] != 'pull':
+                        logger.error("inbound_interest invalid name format: %s", name_str)
+                        return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'invalid name: {name_str}'}}).encode()
+
+                    short_host     = parts[2]
+                    term           = int(parts[4])
+                    prev_log_term  = int(parts[5])
+                    prev_log_index = int(parts[6])
+
+                    # Assemble peer_id: short host + JRaft port from upstream_raft config.
+                    # Full cluster hostname is not needed here; if JRaft requires it,
+                    # expand short_host with the domain suffix at this point.
+                    upstream_raft = self.config.get_grpc_upstream_raft_addr()
+                    raft_port = upstream_raft.split(':')[-1] if ':' in upstream_raft else '8181'
+                    peer_id = f"{short_host}:{raft_port}"
+
                     logger.info(
-                        "inbound_interest name=%s must_be_fresh=%s app_param=%s",
-                        name_str,
-                        param.must_be_fresh,
-                        json.dumps(app_data),
+                        "inbound_interest name=%s term=%d prev_log_term=%d prev_log_index=%d peer_id=%s",
+                        name_str, term, prev_log_term, prev_log_index, peer_id,
                     )
 
-                    # Restore a valid JRaft member ID for the server_id field.
-                    # Follower sidecars send server_id="follower" (a constant) so
-                    # that Interests from different followers at the same log position
-                    # are identical and can be aggregated by NFD.  JRaft requires a
-                    # valid cluster member here, so we substitute peer_id (this
-                    # node's own JRaft address, always a valid member).
-                    raw_server_id = app_data.get('server_id', '')
-                    effective_server_id = (
-                        app_data.get('peer_id', '')
-                        if raw_server_id == 'follower'
-                        else raw_server_id
-                    )
                     req_lite = PullLogEntryRequestLite(
-                        group_id=app_data.get('group_id', ''),
-                        server_id=effective_server_id,
-                        peer_id=app_data.get('peer_id', ''),
-                        term=app_data.get('term', 0),
-                        prev_log_term=app_data.get('prev_log_term', 0),
-                        prev_log_index=app_data.get('prev_log_index', 0),
+                        group_id=os.getenv('RAFT_GROUP_ID', ''),
+                        server_id=peer_id,
+                        peer_id=peer_id,
+                        term=term,
+                        prev_log_term=prev_log_term,
+                        prev_log_index=prev_log_index,
                     )
 
                     req_bytes = encode_pull_log_entry_request(req_lite)
@@ -275,9 +271,9 @@ class NDNServer:
                     )
                     return trimmed_bytes
 
-                except (json.JSONDecodeError, KeyError, ValueError) as e:
-                    logger.error(f"gRPC bridge: Failed to parse app_param: {e}")
-                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'Failed to parse app_param: {str(e)}'}}).encode()
+                except (IndexError, ValueError) as e:
+                    logger.error("gRPC bridge: Failed to parse Interest name %s: %s", name_str, e)
+                    return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'Failed to parse name: {str(e)}'}}).encode()
             else:
                 logger.warning(f"gRPC bridge: Unknown Interest prefix: {name_str}")
                 return json.dumps({

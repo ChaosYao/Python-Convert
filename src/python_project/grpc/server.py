@@ -483,11 +483,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
-        logger.info(
-            "outbound_interest name=%s app_param=%s",
-            interest_name,
-            request_content.decode('utf-8', errors='replace'),
-        )
+        logger.info("outbound_interest name=%s", interest_name)
         
         try:
             client_config = self.config.get_client_config()
@@ -621,12 +617,19 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
                     logger.debug(f"Processing interest from queue: {request.interest_name}")
                     
                     try:
-                        content = await _ndn_client.express_interest_with_params(
-                            request.interest_name,
-                            request.app_param,
-                            lifetime=request.lifetime,
-                            must_be_fresh=request.must_be_fresh
-                        )
+                        if request.app_param is not None:
+                            content = await _ndn_client.express_interest_with_params(
+                                request.interest_name,
+                                request.app_param,
+                                lifetime=request.lifetime,
+                                must_be_fresh=request.must_be_fresh
+                            )
+                        else:
+                            content = await _ndn_client.express_interest(
+                                request.interest_name,
+                                lifetime=request.lifetime,
+                                must_be_fresh=request.must_be_fresh
+                            )
                         request.future.set_result(content)
                     except Exception as e:
                         logger.error(f"Error processing interest: {e}", exc_info=True)

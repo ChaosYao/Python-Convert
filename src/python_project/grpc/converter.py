@@ -11,34 +11,29 @@ logger = logging.getLogger(__name__)
 def pull_log_entry_request_to_interest_name(request) -> str:
     """
     Convert PullLogEntryRequest to NDN Interest name.
-    For PullLogEntries, peer_id represents the target (leader) raft node.
-    Use peer_id as /raft/{host}/pull target; fallback to server_id.
+
+    All request fields are encoded directly in the name so that no
+    AppParameters are needed.  Without AppParameters there is no
+    params-sha256 component, making Interests from different followers
+    with the same request byte-for-byte identical — enabling NFD PIT
+    aggregation and Content Store caching.
+
+    Format: /raft/{leader_host}/pull/{term}/{prev_log_term}/{prev_log_index}
     """
     target_id = request.peer_id or request.server_id
     host = extract_host_from_server_id(target_id)
-    return f"/raft/{host}/pull/{request.term}/{request.prev_log_index}"
+    return f"/raft/{host}/pull/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
 
 
-def pull_log_entry_request_to_data_content(request) -> bytes:
+def pull_log_entry_request_to_data_content(request) -> None:
     """
-    Convert PullLogEntryRequest to bytes for Interest app_param.
+    Returns None — all request data is encoded in the Interest name.
 
-    server_id identifies the requesting follower and is replaced with the
-    constant "follower" so that Interests from different followers with the
-    same log position become identical — enabling NFD Interest aggregation
-    and Content Store caching.  The leader sidecar restores a valid member
-    ID (peer_id) before forwarding to JRaft.
+    No AppParameters means no params-sha256 component in the Interest
+    name, guaranteeing that identical requests produce identical Interest
+    names across all follower pods.
     """
-    data = {
-        '_origin': 'grpc-sidecar',
-        'group_id': request.group_id,
-        'server_id': 'follower',
-        'peer_id': request.peer_id,
-        'term': request.term,
-        'prev_log_term': request.prev_log_term,
-        'prev_log_index': request.prev_log_index
-    }
-    return json.dumps(data).encode()
+    return None
 
 
 def data_content_to_pull_log_entry_response(content: bytes):
