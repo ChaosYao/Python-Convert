@@ -18,7 +18,7 @@ from ndn.security import KeychainSqlite3, TpmFile
 from ..config import get_config
 from ..grpc.client import SimpleClient
 from ..grpc import bidirectional_pb2_grpc
-from ..utils import extract_host_from_server_id, get_hostname
+from ..utils import compose_raft_peer_id, extract_host_from_server_id, get_hostname
 from ..grpc.jraft_codec import (
     PullLogEntryRequestLite,
     encode_pull_log_entry_request,
@@ -177,35 +177,34 @@ class NDNServer:
         try:
             if name_str.startswith("/raft/"):
                 # Name format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
-                # All fields are in the name; no AppParameters are used, eliminating
-                # the params-sha256 component and enabling NFD Interest aggregation.
+                # We keep AppParameters empty so identical requests can still be
+                # aggregated by NFD without a params-sha256 component.
                 try:
                     parts = name_str.split('/')
-                    # parts: ['', 'raft', short_host, 'pull', term, prev_log_term, prev_log_index]
-                    if len(parts) < 7 or parts[3] != 'pull':
+                    # parts: ['', 'raft', short_host, 'pull', group_id, term, prev_log_term, prev_log_index]
+                    if len(parts) < 8 or parts[3] != 'pull':
                         logger.error("inbound_interest invalid name format: %s", name_str)
                         return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'invalid name: {name_str}'}}).encode()
 
-                    short_host     = parts[2]
-                    term           = int(parts[4])
-                    prev_log_term  = int(parts[5])
-                    prev_log_index = int(parts[6])
+                    short_host     = extract_host_from_server_id(parts[2])
+                    group_id       = parts[4]
+                    term           = int(parts[5])
+                    prev_log_term  = int(parts[6])
+                    prev_log_index = int(parts[7])
 
-                    # Assemble peer_id: short host + JRaft port from upstream_raft config.
-                    # Full cluster hostname is not needed here; if JRaft requires it,
-                    # expand short_host with the domain suffix at this point.
                     upstream_raft = self.config.get_grpc_upstream_raft_addr()
                     raft_port = upstream_raft.split(':')[-1] if ':' in upstream_raft else '8181'
-                    peer_id = f"{short_host}:{raft_port}"
+                    peer_id = compose_raft_peer_id(short_host, raft_port)
+                    server_id = "follower"
 
                     logger.info(
-                        "inbound_interest name=%s term=%d prev_log_term=%d prev_log_index=%d peer_id=%s",
-                        name_str, term, prev_log_term, prev_log_index, peer_id,
+                        "inbound_interest name=%s group_id=%s server_id=%s peer_id=%s term=%d prev_log_term=%d prev_log_index=%d",
+                        name_str, group_id, server_id, peer_id, term, prev_log_term, prev_log_index,
                     )
 
                     req_lite = PullLogEntryRequestLite(
-                        group_id=os.getenv('RAFT_GROUP_ID', ''),
-                        server_id=peer_id,
+                        group_id=group_id,
+                        server_id=server_id,
                         peer_id=peer_id,
                         term=term,
                         prev_log_term=prev_log_term,

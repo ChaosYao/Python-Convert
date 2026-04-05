@@ -78,6 +78,25 @@ def extract_host_from_server_id(server_id: str) -> str:
     return host or 'unknown'
 
 
+def compose_raft_peer_id(host: str, port: str | int) -> str:
+    """
+    Build a JRaft peer_id in Kubernetes FQDN form.
+
+    Default shape:
+      <pod>.<headless-service>.<namespace>.svc.<cluster-domain>:<port>
+
+    Environment overrides:
+    - RAFT_HEADLESS_SERVICE, default ``raft``
+    - RAFT_NAMESPACE, default ``raft-demo``
+    - RAFT_CLUSTER_DOMAIN, default ``cluster.local``
+    """
+    short_host = extract_host_from_server_id(host)
+    service = (os.getenv('RAFT_HEADLESS_SERVICE') or 'raft').strip()
+    namespace = (os.getenv('RAFT_NAMESPACE') or 'raft-demo').strip()
+    cluster_domain = (os.getenv('RAFT_CLUSTER_DOMAIN') or 'cluster.local').strip()
+    return f"{short_host}.{service}.{namespace}.svc.{cluster_domain}:{port}"
+
+
 def parse_grpc_target_address(addr: str) -> Tuple[str, Optional[str]]:
     """
     Parse gRPC target "host:port" into host and port.

@@ -18,20 +18,20 @@ def pull_log_entry_request_to_interest_name(request) -> str:
     with the same request byte-for-byte identical — enabling NFD PIT
     aggregation and Content Store caching.
 
-    Format: /raft/{leader_host}/pull/{term}/{prev_log_term}/{prev_log_index}
+    Format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
     """
     target_id = request.peer_id or request.server_id
     host = extract_host_from_server_id(target_id)
-    return f"/raft/{host}/pull/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
+    group_id = getattr(request, 'group_id', '') or ''
+    return f"/raft/{host}/pull/{group_id}/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
 
 
 def pull_log_entry_request_to_data_content(request) -> None:
     """
-    Returns None — all request data is encoded in the Interest name.
+    Returns None — all routing data stays in the Interest name.
 
-    No AppParameters means no params-sha256 component in the Interest
-    name, guaranteeing that identical requests produce identical Interest
-    names across all follower pods.
+    Keeping AppParameters empty avoids a params-sha256 component, so identical
+    follower requests remain byte-for-byte identical and can be aggregated by NFD.
     """
     return None
 
@@ -121,6 +121,4 @@ def data_content_to_pull_log_entry_response(content: bytes):
         response.errorResponse.errorCode = 1  # PARSE_ERROR
         response.errorResponse.errorMsg = str(e)
         return response
-
-
 
