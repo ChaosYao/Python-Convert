@@ -169,17 +169,15 @@ class NDNServer:
         TCP connection setup overhead on every request.
         """
         name_str = Name.to_str(name)
-        logger.debug(f"gRPC bridge: Received Interest: {name_str}, app_param length: {len(app_param) if app_param else 0}")
 
         if self._pull_log_stub is None:
-            error_msg = "gRPC stub not initialized"
-            logger.error(error_msg)
-            return f"Error: {error_msg}".encode()
+            logger.error("gRPC stub not initialized")
+            return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': 'gRPC stub not initialized'}}).encode()
 
         try:
             if name_str.startswith("/raft/"):
                 if not app_param:
-                    logger.error("gRPC bridge: app_param is required for PullLogEntries request")
+                    logger.error("inbound_interest name=%s app_param missing", name_str)
                     return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': 'app_param is required'}}).encode()
 
                 try:
@@ -190,12 +188,11 @@ class NDNServer:
                     else:
                         raw_param = bytes(app_param)
                     app_data = json.loads(raw_param.decode('utf-8'))
-                    is_local_sidecar_interest = app_data.get('_origin') == 'grpc-sidecar'
-                    logger.debug(
-                        "inbound_interest source=%s name=%s app_param_len=%d",
-                        "local_grpc_sidecar" if is_local_sidecar_interest else "external_interest",
+                    logger.info(
+                        "inbound_interest name=%s must_be_fresh=%s app_param=%s",
                         name_str,
-                        len(raw_param),
+                        param.must_be_fresh,
+                        json.dumps(app_data),
                     )
 
                     # Restore a valid JRaft member ID for the server_id field.
@@ -220,13 +217,6 @@ class NDNServer:
                     )
 
                     req_bytes = encode_pull_log_entry_request(req_lite)
-                    logger.debug(
-                        "gRPC bridge: Sending PullLogEntries to %s via %s (%d bytes)",
-                        self.grpc_client.server_address,
-                        _JRAFT_PULL_LOG_METHOD,
-                        len(req_bytes),
-                    )
-
                     t0 = time.monotonic()
                     try:
                         resp_bytes = self._pull_log_stub(req_bytes, timeout=_GRPC_CALL_TIMEOUT_SEC)
@@ -240,12 +230,9 @@ class NDNServer:
                     elapsed = time.monotonic() - t0
                     if elapsed > 1.0:
                         logger.warning(
-                            "slow_grpc_call: name=%s elapsed=%.2fs (threshold=1s) "
-                            "— JRaft may be under write load",
+                            "slow_grpc_call: name=%s elapsed=%.2fs — JRaft may be under write load",
                             name_str, elapsed,
                         )
-                    else:
-                        logger.debug("grpc_call_ok: name=%s elapsed=%.3fs", name_str, elapsed)
 
                     # Guard against oversized NDN packets.
                     # NFD silently closes the face when it receives a packet larger

@@ -483,7 +483,11 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
-        logger.debug(f"Converting PullLogEntries to Interest: {interest_name}")
+        logger.info(
+            "outbound_interest name=%s app_param=%s",
+            interest_name,
+            request_content.decode('utf-8', errors='replace'),
+        )
         
         try:
             client_config = self.config.get_client_config()
@@ -514,14 +518,13 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             )
             
             _ndn_queue.put(interest_request)
-            logger.debug(f"Interest request added to queue: {interest_name}")
             
             timeout = (interest_lifetime / 1000) + 60
             content = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
             
             if content:
                 response = data_content_to_pull_log_entry_response(content)
-                logger.debug(f"Received Data from NDN: success={response.success}, term={response.term}")
+                logger.info("ndn_data_received: name=%s success=%s term=%s", interest_name, response.success, response.term)
                 return response
             else:
                 logger.warning("No Data received from NDN")
