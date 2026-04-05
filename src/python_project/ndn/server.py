@@ -195,7 +195,7 @@ class NDNServer:
                     upstream_raft = self.config.get_grpc_upstream_raft_addr()
                     raft_port = upstream_raft.split(':')[-1] if ':' in upstream_raft else '8181'
                     peer_id = compose_raft_peer_id(short_host, raft_port)
-                    server_id = short_host
+                    server_id = compose_raft_peer_id(short_host, raft_port)
 
                     logger.info(
                         "inbound_interest name=%s group_id=%s server_id=%s peer_id=%s term=%d prev_log_term=%d prev_log_index=%d",
