@@ -639,11 +639,13 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         
         def run_ndn_client():
             global _ndn_client
-            # NDN client does not sign Interests — unsigned Interests have a
-            # deterministic params-sha256 derived solely from AppParameters,
-            # enabling NFD to aggregate identical Interests from multiple followers.
-            # (Only the server side needs a keychain to sign Data responses.)
-            _ndn_client = NDNClient()
+            # Pass a plain NDNApp (no keychain) explicitly so that env vars
+            # NDN_PIB_PATH / NDN_TPM_PATH do NOT trigger keychain loading.
+            # Unsigned Interests produce a deterministic params-sha256 from
+            # AppParameters alone, letting NFD aggregate identical Interests
+            # from multiple followers.
+            from ndn.app import NDNApp as _NDNApp
+            _ndn_client = NDNClient(app=_NDNApp())
             logger.info("NDN client initialized in NDN thread (no keychain — unsigned interests)")
             _ndn_client.app.run_forever(after_start=_after_start())
         
