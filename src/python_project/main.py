@@ -1,175 +1,148 @@
 """
-Main entry point for NDN/gRPC conversion project.
+Main entry point for NDN/gRPC conversion project (Sidecar mode).
 
-Supports running in server or client mode via:
-1. Command line argument: python -m python_project server|client
-2. Environment variable: MODE=server|client
-3. Configuration file: config.yaml
+Runs in sidecar mode: both gRPC Server and NDN Server running concurrently.
+
+Configuration via:
+1. Configuration file: config.yaml
+2. Environment variables
 """
 import asyncio
 import os
 import sys
 import logging
+import threading
+import time
 from typing import Optional
 
-from .ndn.client import NDNClient
 from .ndn.server import NDNServer
-from .utils import setup_logging
+from .utils import setup_logging, get_hostname, extract_host_from_server_id
 from .config import get_config
 
 logger = logging.getLogger(__name__)
 
 
-def get_mode(config_path: Optional[str] = None) -> Optional[str]:
+def run_sidecar(config_path: Optional[str] = None):
     """
-    Get the running mode (server or client) from various sources.
+    Run sidecar mode: both gRPC Server and NDN Server running concurrently.
     
-    Priority order:
-    1. Command line argument
-    2. Environment variable MODE
-    3. Configuration file
-    4. None (will show usage)
-    
-    Args:
-        config_path: Optional path to configuration file
-        
-    Returns:
-        'server', 'client', or None
+    Thread safety:
+    - NDN Server runs in its own thread with its own NDNApp instance
+    - NDN Client (for gRPC Server) runs in its own thread with its own NDNApp instance
+    - gRPC Server runs in async event loop
     """
-    # Check command line argument
-    if len(sys.argv) > 1:
-        mode = sys.argv[1].lower()
-        if mode in ['server', 'client']:
-            return mode
-    
-    # Check environment variable
-    mode = os.getenv('MODE', '').lower()
-    if mode in ['server', 'client']:
-        return mode
-    
-    # Check configuration file
-    config = get_config(config_path)
-    mode = config.get_mode()
-    if mode and mode.lower() in ['server', 'client']:
-        return mode.lower()
-    
-    return None
-
-
-async def run_server(config_path: Optional[str] = None):
-    """Run NDN server that responds to Interests."""
     config = get_config(config_path)
     
-    # Get PIB and TPM paths from config
+    from .grpc.server import run_server_async
+    
     pib_path = config.get_ndn_pib_path()
     tpm_path = config.get_ndn_tpm_path()
-    server = NDNServer(pib_path=pib_path, tpm_path=tpm_path)
     
-    # Get server configuration
-    server_config = config.get_server_config()
-    routes = server_config.get('routes', [])
-    data = server_config.get('data', {})
-    
-    # Log configuration for debugging
-    logger.debug(f"Server config loaded: {server_config}")
-    logger.info(f"Routes to register: {routes}")
-    logger.info(f"Data to store: {list(data.keys())}")
-    
-    # Warn if no routes configured
-    if not routes:
-        logger.warning("No routes configured in config file! Server will not respond to any Interests.")
-        logger.warning("Please configure 'server.routes' in config.yaml")
-    else:
-        # Register routes
-        for route in routes:
-            server.register_route(route)
-    
-    # Warn if no data configured
-    if not data:
-        logger.warning("No data configured in config file!")
-        logger.warning("Please configure 'server.data' in config.yaml")
-    else:
-        # Store data
-        for name, content in data.items():
-            if isinstance(content, str):
-                content = content.encode()
-            server.store_data(name, content)
+    # Build route prefix based on hostname: /raft/{host}/
+    hostname = get_hostname()
+    host = extract_host_from_server_id(hostname)
+    logger.info(f"Current hostname: {hostname}, extracted host: {host}")
+    route_prefix = f"/raft/{host}"
+    logger.info(f"Registering route prefix: {route_prefix}")
+
+    # IMPORTANT: create NDNServer in the SAME thread where app.run_forever() executes.
+    # KeychainSqlite3 uses sqlite objects that are thread-affine.
+    ndn_server_holder: dict[str, Optional[NDNServer]] = {"server": None}
+    ndn_init_done = threading.Event()
+
+    def run_ndn_server_thread():
+        """Run NDN Server in a dedicated thread. No restart — the root cause
+        (oversized NDN packets / event-loop starvation) must be fixed instead."""
+        logger.info("NDN Server thread started")
+        ndn_server: Optional[NDNServer] = None
+        try:
+            ndn_server = NDNServer(pib_path=pib_path, tpm_path=tpm_path, config_path=config_path)
+            ndn_server_holder["server"] = ndn_server
+            ndn_init_done.set()
+            logger.info("NDN Server initialized successfully")
+
+            async def after_nfd_connected():
+                loop = asyncio.get_running_loop()
+                def _loop_exception_handler(loop, context):
+                    exc = context.get('exception')
+                    msg = context.get('message', '')
+                    logger.error(
+                        "NDN event-loop unhandled exception: %s%s",
+                        msg,
+                        f" — {exc}" if exc else "",
+                        exc_info=exc,
+                    )
+                loop.set_exception_handler(_loop_exception_handler)
+
+                ok = await ndn_server.register_route(route_prefix)
+                if ok:
+                    logger.info("NDN route registered: %s", route_prefix)
+                else:
+                    logger.error(
+                        "NDN prefix registration failed for %s. "
+                        "Check NFD authorization/trust schema and `nfdc route list`.",
+                        route_prefix,
+                    )
+
+            ndn_server.app.run_forever(after_start=after_nfd_connected())
+
+            # If we reach here, run_forever() exited without exception.
+            # This means NFD closed the connection — something sent an invalid
+            # packet (check for oversized_ndn_data warnings above this line).
+            logger.error(
+                "NDN run_forever() EXITED — NFD closed the connection. "
+                "prefix=%s is now unreachable. Check logs for oversized_ndn_data "
+                "warnings or slow_grpc_call warnings above this line.",
+                route_prefix,
+            )
+
+        except Exception as e:
+            ndn_init_done.set()  # unblock main thread even on failure
+            logger.error("NDN Server fatal error: %s", e, exc_info=True)
+        finally:
+            if ndn_server:
+                try:
+                    ndn_server.shutdown()
+                except Exception:
+                    pass
+
+    ndn_server_thread = threading.Thread(target=run_ndn_server_thread, daemon=True)
+    ndn_server_thread.start()
+    ndn_init_done.wait(timeout=5.0)
+    ndn_enabled = ndn_server_holder["server"] is not None
     
     logger.info("=" * 50)
-    logger.info("NDN Server started")
-    if routes:
-        logger.info(f"Listening for Interests on prefixes: {', '.join(routes)}")
+    logger.info("Sidecar mode started")
+    logger.info(f"gRPC Server: port {config.get_grpc_server_port()}")
+    if ndn_enabled:
+        logger.info(f"NDN Server: listening on prefix {route_prefix}")
     else:
-        logger.info("No routes registered - server will not respond to Interests")
+        logger.warning("NDN Server: NOT running (initialization failed)")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 50)
     
+    # Run gRPC Server in async event loop (main thread)
     try:
-        await server.run()
+        asyncio.run(run_server_async(port=None, config_path=config_path))
     except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        server.shutdown()
+        logger.info("Shutting down sidecar...")
+        if ndn_server_holder["server"] is not None:
+            ndn_server_holder["server"].shutdown()
+        logger.info("Sidecar stopped")
+    except Exception as e:
+        logger.error(f"gRPC Server error: {e}", exc_info=True)
+        logger.error("Container will keep running for debugging...")
+        # Keep container alive for debugging
+        # NOTE: do NOT write "import time" here — it would shadow the module-level
+        # import and create a closure cell variable that breaks time.sleep() inside
+        # the nested run_ndn_server_thread() function with NameError.
+        while True:
+            time.sleep(60)
+            logger.info("Container still running... (Ctrl+C to exit)")
 
 
-async def run_client(config_path: Optional[str] = None):
-    """Run NDN client that sends Interests."""
-    config = get_config(config_path)
-    
-    # Get PIB and TPM paths from config
-    pib_path = config.get_ndn_pib_path()
-    tpm_path = config.get_ndn_tpm_path()
-    client = NDNClient(pib_path=pib_path, tpm_path=tpm_path)
-    
-    # Get client configuration
-    client_config = config.get_client_config()
-    interests = client_config.get('interests', [])
-    interest_lifetime = client_config.get('interest_lifetime', 4000)
-    
-    # Log configuration for debugging
-    logger.debug(f"Client config loaded: {client_config}")
-    
-    # Warn if no interests configured
-    if not interests:
-        logger.warning("No interests configured in config file! Client will not send any Interests.")
-        logger.warning("Please configure 'client.interests' in config.yaml")
-        logger.info("Example: client.interests: ['/yao/test/demo/B']")
-    else:
-        logger.info(f"Will send {len(interests)} interests: {interests}")
-    
-    async def client_main():
-        """Main client logic."""
-        # Wait a bit for server to be ready
-        await asyncio.sleep(2)
-        
-        logger.info("=" * 50)
-        logger.info("NDN Client started")
-        
-        if not interests:
-            logger.warning("No interests to send. Exiting.")
-            client.shutdown()
-            return
-        
-        logger.info("Sending Interest packets...")
-        logger.info("=" * 50)
-        
-        # Send Interests from configuration
-        for interest_name in interests:
-            content = await client.express_interest(
-                interest_name,
-                lifetime=interest_lifetime
-            )
-            if content:
-                logger.info(f"Received content: {content.decode()}")
-            await asyncio.sleep(1)
-        
-        logger.info("Demo completed")
-        client.shutdown()
-    
-    try:
-        await client.run(after_start=client_main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down client...")
-        client.shutdown()
+
+
 
 
 def main():
@@ -194,52 +167,17 @@ def main():
     logger.info("Note: This demo requires NDN network to be running.")
     logger.info("For local testing, you may need to set up NFD (NDN Forwarding Daemon).")
     
-    # Get mode from various sources
-    mode = get_mode(config_path)
-    
-    if mode == 'server':
-        try:
-            asyncio.run(run_server(config_path))
-        except KeyboardInterrupt:
-            logger.info("Server stopped by user")
-        except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
-    elif mode == 'client':
-        try:
-            asyncio.run(run_client(config_path))
-        except KeyboardInterrupt:
-            logger.info("Client stopped by user")
-        except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
-    else:
-        logger.info("Usage:")
-        logger.info("  Command line: python -m python_project [server|client] [--config=path/to/config.yaml]")
-        logger.info("  Environment:  MODE=server|client python -m python_project")
-        logger.info("  Config file: Create config.yaml (see config.yaml.example)")
-        logger.info("")
-        logger.info("Configuration Priority:")
-        logger.info("  1. Command line arguments")
-        logger.info("  2. Environment variables")
-        logger.info("  3. Configuration file (config.yaml)")
-        logger.info("  4. Default values")
-        logger.info("")
-        logger.info("Configuration File:")
-        logger.info("  - Copy config.yaml.example to config.yaml")
-        logger.info("  - Configure PIB/TPM paths, routes, data, etc.")
-        logger.info("  - Or use --config=/path/to/config.yaml to specify custom location")
-        logger.info("")
-        logger.info("Environment Variables:")
-        logger.info("  MODE: server|client")
-        logger.info("  NDN_PIB_PATH: Path to PIB database")
-        logger.info("  NDN_TPM_PATH: Path to TPM directory")
-        logger.info("  LOG_LEVEL: DEBUG|INFO|WARNING|ERROR|CRITICAL")
-        logger.info("")
-        logger.info("Examples:")
-        logger.info("  python -m python_project server")
-        logger.info("  python -m python_project client --config=my_config.yaml")
-        logger.info("  MODE=server python -m python_project")
-        logger.info("  NDN_PIB_PATH=/path/to/pib.db python -m python_project server")
-        sys.exit(1)
+    try:
+        run_sidecar(config_path)
+    except KeyboardInterrupt:
+        logger.info("Sidecar stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error("Container will keep running for debugging...")
+        # Keep container alive for debugging (time is imported at module level)
+        while True:
+            time.sleep(60)
+            logger.info("Container still running... (Ctrl+C to exit)")
 
 
 if __name__ == '__main__':

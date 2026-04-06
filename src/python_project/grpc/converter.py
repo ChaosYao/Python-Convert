@@ -1,91 +1,124 @@
-"""
-Framework for converting between NDN Interest/Data packets and gRPC messages.
-This is a placeholder framework - actual conversion logic to be implemented.
-"""
-from typing import Optional, Dict, Any
-from ndn.encoding import Name, FormalName
+# Converter between gRPC and NDN
+import base64
+import json
+import logging
+
+from ..utils import extract_host_from_server_id
+
+logger = logging.getLogger(__name__)
 
 
-class NDNGRPCConverter:
+def pull_log_entry_request_to_interest_name(request) -> str:
     """
-    Framework for converting between NDN and gRPC.
-    
-    This class provides the structure for converting:
-    - NDN Interest packets <-> gRPC request messages
-    - NDN Data packets <-> gRPC response messages
+    Convert PullLogEntryRequest to NDN Interest name.
+
+    All request fields are encoded directly in the name so that no
+    AppParameters are needed.  Without AppParameters there is no
+    params-sha256 component, making Interests from different followers
+    with the same request byte-for-byte identical — enabling NFD PIT
+    aggregation and Content Store caching.
+
+    Format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
     """
+    target_id = request.peer_id or request.server_id
+    host = extract_host_from_server_id(target_id)
+    group_id = getattr(request, 'group_id', '') or ''
+    return f"/raft/{host}/pull/{group_id}/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
+
+
+def pull_log_entry_request_to_data_content(request) -> None:
+    """
+    Returns None — all routing data stays in the Interest name.
+
+    Keeping AppParameters empty avoids a params-sha256 component, so identical
+    follower requests remain byte-for-byte identical and can be aggregated by NFD.
+    """
+    return None
+
+
+def data_content_to_pull_log_entry_response(content: bytes):
+    """
+    Convert NDN Data content to PullLogEntryResponse.
+    """
+    from . import bidirectional_pb2
     
-    def __init__(self):
-        """Initialize the converter."""
-        pass
-    
-    def interest_to_grpc(self, name: FormalName, interest_param: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        Convert NDN Interest packet to gRPC request message.
+    try:
+        data = json.loads(content.decode())
         
-        Args:
-            name: NDN Interest name
-            interest_param: Optional Interest parameters
-            
-        Returns:
-            Dictionary representing gRPC request message
-        """
-        # TODO: Implement actual conversion logic
-        return {
-            'name': Name.to_str(name),
-            'interest_param': interest_param or {},
-            'type': 'interest'
-        }
-    
-    def grpc_to_interest(self, grpc_message: Dict[str, Any]) -> tuple[FormalName, Optional[Dict]]:
-        """
-        Convert gRPC request message to NDN Interest packet.
+        response = bidirectional_pb2.PullLogEntryResponse()
+        response.term = data.get('term', 0)
+        response.success = data.get('success', False)
+        response.last_log_index = data.get('last_log_index', 0)
+        response.committed_index = data.get('committed_index', 0)
         
-        Args:
-            grpc_message: Dictionary representing gRPC request message
-            
-        Returns:
-            Tuple of (name, interest_param)
-        """
-        # TODO: Implement actual conversion logic
-        name = Name.from_str(grpc_message.get('name', '/'))
-        interest_param = grpc_message.get('interest_param')
-        return name, interest_param
-    
-    def data_to_grpc(self, name: FormalName, content: bytes, meta_info: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        Convert NDN Data packet to gRPC response message.
+        # Parse entries with full EntryMeta structure
+        if 'entries' in data and isinstance(data['entries'], list):
+            for entry_data in data['entries']:
+                entry = response.entries.add()
+                entry.term = entry_data.get('term', 0)
+                # EntryType: convert string to enum value
+                entry_type_str = entry_data.get('type', 'ENTRY_TYPE_UNKNOWN')
+                if isinstance(entry_type_str, int):
+                    entry.type = entry_type_str
+                else:
+                    # Map string to enum
+                    type_map = {
+                        'ENTRY_TYPE_UNKNOWN': bidirectional_pb2.ENTRY_TYPE_UNKNOWN,
+                        'ENTRY_TYPE_NO_OP': bidirectional_pb2.ENTRY_TYPE_NO_OP,
+                        'ENTRY_TYPE_DATA': bidirectional_pb2.ENTRY_TYPE_DATA,
+                        'ENTRY_TYPE_CONFIGURATION': bidirectional_pb2.ENTRY_TYPE_CONFIGURATION,
+                    }
+                    entry.type = type_map.get(entry_type_str.upper(), bidirectional_pb2.ENTRY_TYPE_UNKNOWN)
+                
+                # Peers
+                if 'peers' in entry_data:
+                    entry.peers.extend(entry_data['peers'])
+                
+                # Data length
+                if 'data_len' in entry_data:
+                    entry.data_len = entry_data['data_len']
+                
+                # Old peers
+                if 'old_peers' in entry_data:
+                    entry.old_peers.extend(entry_data['old_peers'])
+                
+                # Checksum
+                if 'checksum' in entry_data:
+                    entry.checksum = entry_data['checksum']
+                
+                # Learners
+                if 'learners' in entry_data:
+                    entry.learners.extend(entry_data['learners'])
+                
+                # Old learners
+                if 'old_learners' in entry_data:
+                    entry.old_learners.extend(entry_data['old_learners'])
         
-        Args:
-            name: NDN Data name
-            content: Data content bytes
-            meta_info: Optional metadata information
-            
-        Returns:
-            Dictionary representing gRPC response message
-        """
-        # TODO: Implement actual conversion logic
-        return {
-            'name': Name.to_str(name),
-            'content': content.hex(),  # Convert bytes to hex string for JSON
-            'meta_info': meta_info or {},
-            'type': 'data'
-        }
-    
-    def grpc_to_data(self, grpc_message: Dict[str, Any]) -> tuple[FormalName, bytes, Optional[Dict]]:
-        """
-        Convert gRPC response message to NDN Data packet.
+        # Parse data field: decode base64 if it's a string, otherwise use bytes directly
+        if 'data' in data:
+            if isinstance(data['data'], str):
+                try:
+                    # Try base64 decode first (for binary data)
+                    response.data = base64.b64decode(data['data'])
+                except Exception:
+                    # If base64 decode fails, treat as UTF-8 text
+                    response.data = data['data'].encode('utf-8')
+            elif isinstance(data['data'], bytes):
+                response.data = data['data']
         
-        Args:
-            grpc_message: Dictionary representing gRPC response message
-            
-        Returns:
-            Tuple of (name, content, meta_info)
-        """
-        # TODO: Implement actual conversion logic
-        name = Name.from_str(grpc_message.get('name', '/'))
-        content_hex = grpc_message.get('content', '')
-        content = bytes.fromhex(content_hex) if content_hex else b''
-        meta_info = grpc_message.get('meta_info')
-        return name, content, meta_info
+        # Parse error response (using errorCode and errorMsg)
+        if 'errorResponse' in data:
+            error_data = data['errorResponse']
+            response.errorResponse.errorCode = error_data.get('errorCode', 0)
+            response.errorResponse.errorMsg = error_data.get('errorMsg', '')
+        
+        return response
+    except Exception as e:
+        logger.error(f"Failed to parse Data content to PullLogEntryResponse: {e}", exc_info=True)
+        # Return error response
+        response = bidirectional_pb2.PullLogEntryResponse()
+        response.success = False
+        response.errorResponse.errorCode = 1  # PARSE_ERROR
+        response.errorResponse.errorMsg = str(e)
+        return response
 

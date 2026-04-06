@@ -58,7 +58,7 @@ class Config:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     self._config = yaml.safe_load(f) or {}
                 logger.info(f"Loaded configuration from: {config_file}")
-                logger.debug(f"Config content: {self._config}")
+                logger.info(f"Config content: {self._config}")
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_file}: {e}")
                 self._config = {}
@@ -66,8 +66,8 @@ class Config:
             if self.config_path:
                 logger.warning(f"Configuration file not found: {self.config_path}")
             else:
-                logger.debug("No configuration file found, using defaults and environment variables")
-                logger.debug(f"Searched paths: {possible_paths}")
+                logger.info("No configuration file found, using defaults and environment variables")
+                logger.info(f"Searched paths: {possible_paths}")
     
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -111,19 +111,25 @@ class Config:
     
     def get_ndn_pib_path(self) -> Optional[str]:
         """Get NDN PIB path from config or environment."""
-        return self.get('ndn.pib_path') or self.get('NDN_PIB_PATH')
+        path = self.get('ndn.pib_path') or self.get('NDN_PIB_PATH')
+        if path:
+            # Expand ~ and relative paths
+            path = os.path.expanduser(path)
+            path = os.path.abspath(path)
+        return path
     
     def get_ndn_tpm_path(self) -> Optional[str]:
         """Get NDN TPM path from config or environment."""
-        return self.get('ndn.tpm_path') or self.get('NDN_TPM_PATH')
+        path = self.get('ndn.tpm_path') or self.get('NDN_TPM_PATH')
+        if path:
+            # Expand ~ and relative paths
+            path = os.path.expanduser(path)
+            path = os.path.abspath(path)
+        return path
     
     def get_log_level(self) -> str:
         """Get log level from config or environment."""
         return self.get('logging.level', 'INFO') or os.getenv('LOG_LEVEL', 'INFO')
-    
-    def get_mode(self) -> Optional[str]:
-        """Get running mode from config or environment."""
-        return self.get('mode') or os.getenv('MODE')
     
     def get_server_config(self) -> Dict[str, Any]:
         """Get server-specific configuration."""
@@ -132,6 +138,150 @@ class Config:
     def get_client_config(self) -> Dict[str, Any]:
         """Get client-specific configuration."""
         return self._config.get('client', {})
+    
+    def get_client_disable_cache(self) -> bool:
+        """Get disable_cache setting from client config."""
+        return self.get('client.disable_cache', False)
+    
+    def get_grpc_config(self) -> Dict[str, Any]:
+        return self._config.get('grpc', {})
+    
+    def get_grpc_server_port(self) -> int:
+        port = self.get('grpc.server.port') or os.getenv('GRPC_SERVER_PORT')
+        if port:
+            return int(port)
+        return 19090  # Default gRPC server port
+    
+    def get_grpc_client_host(self) -> str:
+        """
+        Address for gRPC client demos / tests.
+
+        NOTE: the NDN server's Interest->gRPC bridge does NOT use this; it uses
+        get_grpc_upstream_raft_addr() (127.0.0.1:8181) so that it calls JRaft
+        directly instead of looping back through the sidecar.
+        """
+        host = self.get('grpc.client.host') or os.getenv('GRPC_CLIENT_HOST')
+        if host:
+            return host
+        return 'localhost:19090'
+
+    def get_grpc_upstream_raft_addr(self) -> str:
+        """
+        Same-pod JRaft gRPC (Java), bypassing this sidecar's listen port.
+
+        Used when transparent forward has no peer_id/metadata (e.g. Cli GetLeaderRequest).
+        Must NOT be the sidecar port or requests will loop back into this process.
+        """
+        h = self.get('grpc.server.upstream_raft') or os.getenv('GRPC_UPSTREAM_RAFT')
+        if h:
+            return h
+        return '127.0.0.1:8181'
+    
+    def get_peer_sidecar_port(self) -> int:
+        """
+        Port used when forwarding to a remote peer's sidecar.
+
+        When the sidecar derives a forward target from peer_id (e.g. raft-1:8181),
+        it rewrites the port to this value (e.g. raft-1:19090) so that outbound
+        traffic targets the peer's sidecar port instead of the JRaft port.
+        This keeps all sidecar-to-sidecar communication on a port that is NOT
+        covered by the iptables OUTPUT REDIRECT rule (which only matches APP_PORT /
+        the JRaft port), preventing re-interception loops even when both processes
+        run as uid=0.
+
+        Override via env var PEER_SIDECAR_PORT.
+        """
+        v = self.get('grpc.server.peer_sidecar_port') or os.getenv('PEER_SIDECAR_PORT')
+        if v:
+            return int(v)
+        return self.get_grpc_server_port()
+
+    def get_grpc_forward_target(self) -> Optional[str]:
+        """
+        Get target gRPC server address for direct forwarding (without NDN conversion).
+        If configured, requests will be forwarded directly to this server.
+        Returns None if not configured (will use NDN conversion or return error).
+        """
+        target = self.get('grpc.server.forward_target') or os.getenv('GRPC_FORWARD_TARGET')
+        if target:
+            return target
+        return None
+    
+    def get_grpc_forward_methods(self) -> list[str]:
+        """
+        Get list of RPC method names that should be forwarded (not converted to NDN).
+        If empty, all methods (except those explicitly configured for NDN) will be forwarded.
+        """
+        methods = self.get('grpc.server.forward_methods', [])
+        if not isinstance(methods, list):
+            return []
+        return [str(m) for m in methods if m]
+    
+    def should_forward_method(self, method_name: str) -> bool:
+        """
+        Determine if a method should be forwarded based on configuration.
+        
+        Rules:
+        1. If forward_methods is configured and method is in the list -> forward
+        2. If forward_methods is empty and forward_target is configured -> forward (default)
+        3. Otherwise -> convert to NDN (if use_ndn is True)
+        """
+        forward_methods = self.get_grpc_forward_methods()
+        forward_target = self.get_grpc_forward_target()
+        
+        # If forward_methods is explicitly configured
+        if forward_methods:
+            return method_name in forward_methods
+        
+        # If forward_target is configured but forward_methods is empty, forward all (except PullLogEntries if use_ndn)
+        if forward_target:
+            # If use_ndn is True, only forward non-PullLogEntries methods
+            # If use_ndn is False, forward all
+            use_ndn = self.get_grpc_server_use_ndn()
+            if use_ndn:
+                # Only forward methods that are not PullLogEntries
+                return method_name != 'PullLogEntries'
+            else:
+                # Forward all methods
+                return True
+        
+        # Default: don't forward (convert to NDN or return error)
+        return False
+    
+    def get_grpc_test_data(self) -> list[tuple[int, str]]:
+        test_data = self.get('grpc.test_data', [])
+        if test_data:
+            return [(item[0], item[1]) for item in test_data if len(item) >= 2]
+        return [(1, "test1"), (2, "test2"), (3, "test3"), (4, "test4")]
+    
+    def get_grpc_server_use_ndn(self) -> bool:
+        """Get whether gRPC server should use NDN client."""
+        value = self.get('grpc.server.use_ndn')
+        if value is None:
+            return True  # Default to True for backward compatibility
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
+    
+    def get_ndn_server_use_grpc(self) -> bool:
+        """Get whether NDN server should use gRPC client for bridge."""
+        value = self.get('grpc.bridge_enabled')
+        if value is None:
+            return False  # Default to False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
+    
+    def get_ndn_server_grpc_bridge_prefixes(self) -> list[str]:
+        """Get list of prefixes that should be forwarded to gRPC server."""
+        prefixes = self.get('grpc.bridge_prefixes', [])
+        if not isinstance(prefixes, list):
+            return []
+        return [str(p) for p in prefixes if p]
 
 
 # Global config instance

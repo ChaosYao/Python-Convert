@@ -2,7 +2,13 @@
 gRPC conversion framework for NDN Interest/Data packets.
 """
 
-from .converter import NDNGRPCConverter
+from .server import SimpleService, create_server, run_server
+from .client import SimpleClient
 
-__all__ = ['NDNGRPCConverter']
+__all__ = [
+    'SimpleService',
+    'create_server',
+    'run_server',
+    'SimpleClient',
+]
 

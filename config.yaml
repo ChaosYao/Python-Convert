@@ -1,0 +1,74 @@
+# NDN/gRPC Conversion Project Configuration (Sidecar Mode)
+# Copy this file to config.yaml and modify as needed
+
+# Logging configuration
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# NDN configuration
+ndn:
+  # PIB (Public Information Base) database path
+  # Path to SQLite database file for storing public keys and certificates
+  # Leave empty to use default: ~/.ndn/pib.db
+  pib_path: /root/.ndn/pib.db
+
+  # TPM (Trusted Platform Module) directory path
+  # Directory for storing private keys
+  # Leave empty to use default: ~/.ndn/ndnsec-key-file
+  tpm_path: /root/.ndn/ndnsec-key-file
+
+# Server-specific configuration
+server:
+  # Routes to register (list of prefixes)
+  # NDN server will forward Interest requests to gRPC server via bridge
+  routes:
+    - /yao/test/demo/B
+  
+  # Freshness period for Data packets (in milliseconds)
+  freshness_period: 10000
+
+# Client-specific configuration (for gRPC Server to NDN conversion)
+client:
+  # Interest lifetime (in milliseconds)
+  interest_lifetime: 4000
+  
+  # Disable cache (must_be_fresh flag)
+  # If true, Interest will require fresh data and bypass cache
+  disable_cache: true
+  
+  # Interest name to use when converting gRPC requests to NDN Interests
+  # This is used by gRPC Server when forwarding requests to NDN
+  interests:
+    - /yao/test/demo/B
+
+# gRPC configuration
+grpc:
+  # Server configuration
+  server:
+    # Server listening port (default: 19090)
+    port: 19090
+    # Whether to use NDN client for request processing
+    # If true, requests will be routed through NDN
+    # If false, requests will be processed by gRPC server directly
+    use_ndn: true
+    # JRaft in the same pod (no peer_id / Cli RPC fallback). Use loopback so iptables OUTPUT RETURN applies.
+    upstream_raft: 127.0.0.1:8181
+    # Port used when forwarding to a remote peer's sidecar.
+    # Must NOT be the JRaft port (APP_PORT in iptables), so OUTPUT rules don't re-intercept.
+    peer_sidecar_port: 19090
+  
+  # Client configuration (NDN bridge -> Python gRPC; must be sidecar listen port, not JRaft 8181)
+  client:
+    # Server address (host:port)
+    host: localhost:19090
+  # Test data for client demo (value, payload)
+  test_data:
+    - [1, "test1"]
+  
+  # Bridge configuration
+  # If true, NDN server will forward Interest requests to gRPC server
+  # Interest app_param will be converted to gRPC request, and gRPC response will be converted to Data packet
+  bridge_enabled: true  # enable ndn-to-grpc bridge in NDN server
+  # Prefixes that should be forwarded to gRPC server (empty list means all prefixes when bridge_enabled is true)
+  bridge_prefixes: []  # e.g., ["/grpc/forward", "/api/grpc"]
+
