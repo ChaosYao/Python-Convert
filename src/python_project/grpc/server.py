@@ -134,7 +134,9 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 method,
                 len(request_bytes),
             )
-            if is_jraft_pull:
+            # Only convert PullLog to NDN when use_ndn is enabled; otherwise fall through and
+            # forward it upstream like any other RPC (use_ndn=false => transparent passthrough).
+            if is_jraft_pull and self.config.get_grpc_server_use_ndn():
                 logger.info(
                     "transparent_passthrough jraft_branch: kind=pull_log_ndn (NDN path, no grpc outbound); method=%s",
                     method,
@@ -472,14 +474,9 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         use_ndn = self.config.get_grpc_server_use_ndn()
         
         if not use_ndn:
-            logger.warning("NDN is disabled, but request reached here. This should not happen in sidecar mode.")
-            response = bidirectional_pb2.PullLogEntryResponse()
-            response.success = False
-            response.errorResponse.errorCode = 100
-            response.errorResponse.errorMsg = "NDN processing is disabled"
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            context.set_details("NDN processing is disabled")
-            return response
+            # NDN disabled: forward PullLogEntries upstream like any other RPC (transparent passthrough).
+            logger.info("NDN disabled: forwarding PullLogEntries to upstream like other RPCs")
+            return await asyncio.to_thread(self._forward_rpc, 'PullLogEntries', request, context)
         
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
