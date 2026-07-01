@@ -7,7 +7,7 @@ import os
 import re
 from typing import Optional
 from ndn.app import NDNApp
-from ndn.encoding import Name, FormalName, InterestParam
+from ndn.encoding import Name, FormalName, InterestParam, parse_data
 from ndn.security import KeychainSqlite3, TpmFile
 
 from ..config import get_config
@@ -106,6 +106,42 @@ class NDNServer:
             self.grpc_client = SimpleClient(server_address=grpc_host, config_path=config_path)
             self.grpc_client.connect()
             logger.info(f"gRPC client initialized for bridge (upstream JRaft): {grpc_host}")
+
+    def _put_data_checked(self, name: FormalName, content: bytes, freshness_period: int) -> None:
+        """
+        Publish a Data packet, but first dump and independently validate the exact
+        wire NFD will receive.
+
+        DUMP/DEBUG: split put_data into prepare_data + parse_data + put_raw_packet.
+        On NFD's UnixStreamTransport the packet that trips
+        "Failed to parse incoming packet or packet too large" is usually AFTER the
+        real culprit: one packet whose declared TLV-LENGTH disagrees with its byte
+        count desyncs the stream parser, and NFD only errors once its buffer
+        overflows 8800 bytes. So validate EVERY packet and surface the FIRST bad one.
+        """
+        wire = bytes(self.app.prepare_data(
+            name, content=content, freshness_period=freshness_period))
+
+        if len(wire) > 8000:
+            logger.error(
+                "[DUMP] OVERSIZE wire_len=%d content_len=%d name=%s",
+                len(wire), len(content), Name.to_str(name),
+            )
+
+        try:
+            parse_data(wire)  # raises if the outer Data TLV is malformed
+            logger.debug(
+                "[DUMP] OK wire_len=%d content_len=%d name=%s",
+                len(wire), len(content), Name.to_str(name),
+            )
+        except Exception as pe:
+            # First packet that lands here is the real culprit.
+            logger.error(
+                "[DUMP] BAD PACKET wire_len=%d content_len=%d name=%s err=%s hex=%s",
+                len(wire), len(content), Name.to_str(name), pe, wire.hex(),
+            )
+
+        self.app.put_raw_packet(wire)
 
     async def _grpc_bridge_handler(self, name: FormalName, param: InterestParam, app_param: bytes) -> bytes:
         """
@@ -258,7 +294,7 @@ class NDNServer:
                     }
                 }).encode()
                 freshness_period = self.config.get_server_config().get('freshness_period', 10000)
-                self.app.put_data(name, content=content, freshness_period=freshness_period)
+                self._put_data_checked(name, content, freshness_period)
 
             try:
                 ok = await self.app.register(prefix, not_configured_handler)
@@ -306,7 +342,7 @@ class NDNServer:
 
                 logger.info(f"Sending Data: {name_str}, Content length: {len(content)} bytes")
                 freshness_period = self.config.get_server_config().get('freshness_period', 10000)
-                self.app.put_data(name, content=content, freshness_period=freshness_period)
+                self._put_data_checked(name, content, freshness_period)
 
             asyncio.ensure_future(_handle())
 
