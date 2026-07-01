@@ -12,7 +12,7 @@ from typing import Optional
 import grpc
 
 from ndn.app import NDNApp
-from ndn.encoding import Name, FormalName, InterestParam
+from ndn.encoding import Name, FormalName, InterestParam, parse_data
 from ndn.security import KeychainSqlite3, TpmFile
 
 from ..config import get_config
@@ -312,7 +312,37 @@ class NDNServer:
                 continue
 
             try:
-                self.app.put_data(name, content=content, freshness_period=freshness_period)
+                # DUMP/DEBUG: split put_data into prepare + send so we can inspect
+                # and independently validate the exact wire NFD will receive.
+                # On a stream transport, the packet that trips NFD's
+                # "Failed to parse incoming packet or packet too large" is usually
+                # AFTER the real culprit: one packet whose declared TLV-LENGTH
+                # disagrees with its byte count desyncs the parser, and NFD only
+                # errors once its buffer overflows 8800 bytes. So validate EVERY
+                # packet and surface the FIRST bad one.
+                wire = bytes(self.app.prepare_data(
+                    name, content=content, freshness_period=freshness_period))
+
+                if len(wire) > 8000:
+                    logger.error(
+                        "[DUMP] OVERSIZE wire_len=%d content_len=%d name=%s",
+                        len(wire), len(content), Name.to_str(name),
+                    )
+
+                try:
+                    parse_data(wire)  # raises if the outer Data TLV is malformed
+                    logger.debug(
+                        "[DUMP] OK wire_len=%d content_len=%d name=%s",
+                        len(wire), len(content), Name.to_str(name),
+                    )
+                except Exception as pe:
+                    # First packet that lands here is the real culprit.
+                    logger.error(
+                        "[DUMP] BAD PACKET wire_len=%d content_len=%d name=%s err=%s hex=%s",
+                        len(wire), len(content), Name.to_str(name), pe, wire.hex(),
+                    )
+
+                self.app.put_raw_packet(wire)
                 logger.debug("put_data ok: %s (%d bytes)", Name.to_str(name), len(content))
             except Exception as e:
                 logger.error(
