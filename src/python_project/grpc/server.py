@@ -133,12 +133,14 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 method,
                 len(request_bytes),
             )
-            # Only convert PullLog to NDN when use_ndn is enabled; otherwise fall through and
-            # forward it upstream like any other RPC (use_ndn=false => transparent passthrough).
-            if is_jraft_pull and self.config.get_grpc_server_use_ndn():
+            # Always convert PullLog to NDN. use_ndn selects the encoding:
+            #   use_ndn=True  -> name-only Interest (no app_param, NFD-aggregatable)
+            #   use_ndn=False -> legacy Interest carrying app_param
+            if is_jraft_pull:
+                use_app_param = not self.config.get_grpc_server_use_ndn()
                 logger.debug(
-                    "transparent_passthrough jraft_branch: kind=pull_log_ndn method=%s",
-                    method,
+                    "transparent_passthrough jraft_branch: kind=pull_log_ndn method=%s use_app_param=%s",
+                    method, use_app_param,
                 )
                 # Convert PullLogEntryRequest -> NDN Interest -> PullLogEntryResponse (protobuf bytes)
                 try:
@@ -154,8 +156,8 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     return b""
 
                 # Build NDN interest
-                interest_name = pull_log_entry_request_to_interest_name(req)
-                app_param = pull_log_entry_request_to_data_content(req)
+                interest_name = pull_log_entry_request_to_interest_name(req, use_app_param=use_app_param)
+                app_param = pull_log_entry_request_to_data_content(req, use_app_param=use_app_param)
 
                 client_config = self.config.get_client_config()
                 interest_lifetime = client_config.get('interest_lifetime', 4000)
@@ -461,18 +463,11 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             request.term,
         )
         
-        use_ndn = self.config.get_grpc_server_use_ndn()
-        
-        if not use_ndn:
-            logger.warning("NDN is disabled, but request reached here. This should not happen in sidecar mode.")
-            response = bidirectional_pb2.PullLogEntryResponse()
-            response.success = False
-            response.errorResponse.errorCode = 100
-            response.errorResponse.errorMsg = "NDN processing is disabled"
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            context.set_details("NDN processing is disabled")
-            return response
-        
+        # Always convert to NDN. use_ndn selects the encoding:
+        #   use_ndn=True  -> name-only Interest (no app_param, NFD-aggregatable)
+        #   use_ndn=False -> legacy Interest carrying app_param
+        use_app_param = not self.config.get_grpc_server_use_ndn()
+
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
             response = bidirectional_pb2.PullLogEntryResponse()
@@ -483,9 +478,9 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             context.set_details("NDN client or queue not initialized")
             return response
         
-        interest_name = pull_log_entry_request_to_interest_name(request)
-        request_content = pull_log_entry_request_to_data_content(request)
-        logger.info("outbound_interest name=%s", interest_name)
+        interest_name = pull_log_entry_request_to_interest_name(request, use_app_param=use_app_param)
+        request_content = pull_log_entry_request_to_data_content(request, use_app_param=use_app_param)
+        logger.info("outbound_interest name=%s use_app_param=%s", interest_name, use_app_param)
         
         try:
             client_config = self.config.get_client_config()

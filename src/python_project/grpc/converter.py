@@ -8,32 +8,56 @@ from ..utils import extract_host_from_server_id
 logger = logging.getLogger(__name__)
 
 
-def pull_log_entry_request_to_interest_name(request) -> str:
+def pull_log_entry_request_to_interest_name(request, use_app_param: bool = False) -> str:
     """
     Convert PullLogEntryRequest to NDN Interest name.
 
-    All request fields are encoded directly in the name so that no
-    AppParameters are needed.  Without AppParameters there is no
-    params-sha256 component, making Interests from different followers
-    with the same request byte-for-byte identical — enabling NFD PIT
-    aggregation and Content Store caching.
+    Two encodings, selected by ``use_app_param`` (which the caller derives from
+    ``not use_ndn``):
 
-    Format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
+    - use_app_param=False (use_ndn=True, new default): all request fields are
+      encoded directly in the name so no AppParameters are needed.  Without a
+      params-sha256 component, Interests from different followers with the same
+      request are byte-for-byte identical — enabling NFD PIT aggregation and
+      Content Store caching.
+      Format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
+
+    - use_app_param=True (use_ndn=False, legacy): only routing basics go in the
+      name; the rest travel in AppParameters (see
+      pull_log_entry_request_to_data_content).
+      Format: /raft/{leader_host}/pull/{term}/{prev_log_index}
     """
     target_id = request.peer_id or request.server_id
     host = extract_host_from_server_id(target_id)
+    if use_app_param:
+        return f"/raft/{host}/pull/{request.term}/{request.prev_log_index}"
     group_id = getattr(request, 'group_id', '') or ''
     return f"/raft/{host}/pull/{group_id}/{request.term}/{request.prev_log_term}/{request.prev_log_index}"
 
 
-def pull_log_entry_request_to_data_content(request) -> None:
+def pull_log_entry_request_to_data_content(request, use_app_param: bool = False):
     """
-    Returns None — all routing data stays in the Interest name.
+    Build the Interest AppParameters (Data content) for a PullLogEntryRequest.
 
-    Keeping AppParameters empty avoids a params-sha256 component, so identical
-    follower requests remain byte-for-byte identical and can be aggregated by NFD.
+    - use_app_param=False (use_ndn=True): returns None — all routing data stays
+      in the Interest name, keeping AppParameters empty so identical follower
+      requests stay byte-for-byte identical and can be aggregated by NFD.
+
+    - use_app_param=True (use_ndn=False, legacy): returns the full request as a
+      JSON byte string so the bridge can reconstruct it from AppParameters.
     """
-    return None
+    if not use_app_param:
+        return None
+    data = {
+        '_origin': 'grpc-sidecar',
+        'group_id': request.group_id,
+        'server_id': request.server_id,
+        'peer_id': request.peer_id,
+        'term': request.term,
+        'prev_log_term': request.prev_log_term,
+        'prev_log_index': request.prev_log_index,
+    }
+    return json.dumps(data).encode()
 
 
 def data_content_to_pull_log_entry_response(content: bytes):
