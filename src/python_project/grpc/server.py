@@ -556,12 +556,13 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
         port = config.get_grpc_server_port()
     
     use_ndn = config.get_grpc_server_use_ndn()
-    
-    if use_ndn:
-        if _ndn_queue is None:
-            _ndn_queue = Queue()
-            logger.info("NDN interest queue created")
-    
+
+    # NDN is always used now (use_ndn only selects the pull encoding), so the
+    # interest queue is always required.
+    if _ndn_queue is None:
+        _ndn_queue = Queue()
+        logger.info("NDN interest queue created")
+
     servicer = SimpleService(config_path=config_path)
     server = grpc.aio.server()
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(servicer, server)
@@ -578,9 +579,9 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
         collect_local_identity_hosts(),
     )
     if use_ndn:
-        logger.info("NDN enabled: PullLogEntryRequest will be converted to NDN Interest, other requests will be forwarded directly")
+        logger.info("NDN enabled (name-only encoding): PullLogEntryRequest -> NDN Interest without app_param; other requests forwarded directly")
     else:
-        logger.info("gRPC server running in default mode (NDN disabled)")
+        logger.info("NDN enabled (legacy app_param encoding): PullLogEntryRequest -> NDN Interest with app_param; other requests forwarded directly")
     return server
 
 
@@ -590,9 +591,12 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
     server = create_server(port, config_path)
     
     config = get_config(config_path)
-    use_ndn = config.get_grpc_server_use_ndn()
-    
-    if use_ndn:
+    # NDN is always initialized now — use_ndn only selects the pull encoding
+    # (see SimpleService). Both encodings still send Interests through the NDN
+    # client + queue, so the client is started unconditionally.
+    ndn_enabled = True
+
+    if ndn_enabled:
         if _ndn_queue is None:
             logger.error("NDN queue not initialized")
             raise RuntimeError("NDN queue not initialized")
@@ -658,9 +662,7 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
         except asyncio.TimeoutError:
             logger.warning("NDN client connection timeout, continuing anyway...")
             _ndn_connected.set()
-    else:
-        logger.info("NDN client disabled, skipping NDN initialization")
-    
+
     await server.start()
     logger.info("gRPC server started, waiting for connections...")
     
