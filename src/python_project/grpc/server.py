@@ -133,7 +133,9 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 method,
                 len(request_bytes),
             )
-            if is_jraft_pull:
+            # Only convert PullLog to NDN when use_ndn is enabled; otherwise fall through and
+            # forward it upstream like any other RPC (use_ndn=false => transparent passthrough).
+            if is_jraft_pull and self.config.get_grpc_server_use_ndn():
                 logger.debug(
                     "transparent_passthrough jraft_branch: kind=pull_log_ndn method=%s",
                     method,
