@@ -176,66 +176,40 @@ class NDNServer:
 
         try:
             if name_str.startswith("/raft/"):
-                # Two encodings are supported, chosen by the sender's use_ndn:
-                #   use_ndn=True  -> name-only: everything in the name, no app_param
-                #      Name: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
-                #   use_ndn=False -> legacy: full request carried in app_param (JSON)
-                # We detect the mode by whether app_param is present.
+                # Name format: /raft/{leader_host}/pull/{group_id}/{term}/{prev_log_term}/{prev_log_index}
+                # We keep AppParameters empty so identical requests can still be
+                # aggregated by NFD without a params-sha256 component.
                 try:
-                    if app_param:
-                        # Legacy encoding: reconstruct the request from app_param JSON.
-                        if isinstance(app_param, memoryview):
-                            raw_param = app_param.tobytes()
-                        elif isinstance(app_param, bytes):
-                            raw_param = app_param
-                        else:
-                            raw_param = bytes(app_param)
-                        app_data = json.loads(raw_param.decode('utf-8'))
-                        req_lite = PullLogEntryRequestLite(
-                            group_id=app_data.get('group_id', ''),
-                            server_id=app_data.get('server_id', ''),
-                            peer_id=app_data.get('peer_id', ''),
-                            term=app_data.get('term', 0),
-                            prev_log_term=app_data.get('prev_log_term', 0),
-                            prev_log_index=app_data.get('prev_log_index', 0),
-                        )
-                        logger.info(
-                            "inbound_interest source=app_param name=%s group_id=%s server_id=%s peer_id=%s "
-                            "term=%s prev_log_term=%s prev_log_index=%s",
-                            name_str, req_lite.group_id, req_lite.server_id, req_lite.peer_id,
-                            req_lite.term, req_lite.prev_log_term, req_lite.prev_log_index,
-                        )
-                    else:
-                        # New encoding: everything is in the name.
-                        parts = name_str.split('/')
-                        # parts: ['', 'raft', short_host, 'pull', group_id, term, prev_log_term, prev_log_index]
-                        if len(parts) < 8 or parts[3] != 'pull':
-                            logger.error("inbound_interest invalid name format: %s", name_str)
-                            return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'invalid name: {name_str}'}}).encode()
+                    parts = name_str.split('/')
+                    # parts: ['', 'raft', short_host, 'pull', group_id, term, prev_log_term, prev_log_index]
+                    if len(parts) < 8 or parts[3] != 'pull':
+                        logger.error("inbound_interest invalid name format: %s", name_str)
+                        return json.dumps({'success': False, 'errorResponse': {'errorCode': 1, 'errorMsg': f'invalid name: {name_str}'}}).encode()
 
-                        short_host     = extract_host_from_server_id(parts[2])
-                        group_id       = parts[4]
-                        term           = int(parts[5])
-                        prev_log_term  = int(parts[6])
-                        prev_log_index = int(parts[7])
+                    short_host     = extract_host_from_server_id(parts[2])
+                    group_id       = parts[4]
+                    term           = int(parts[5])
+                    prev_log_term  = int(parts[6])
+                    prev_log_index = int(parts[7])
 
-                        upstream_raft = self.config.get_grpc_upstream_raft_addr()
-                        raft_port = upstream_raft.split(':')[-1] if ':' in upstream_raft else '8181'
-                        peer_id = compose_raft_peer_id(short_host, raft_port)
-                        server_id = compose_raft_peer_id(short_host, raft_port)
+                    upstream_raft = self.config.get_grpc_upstream_raft_addr()
+                    raft_port = upstream_raft.split(':')[-1] if ':' in upstream_raft else '8181'
+                    peer_id = compose_raft_peer_id(short_host, raft_port)
+                    server_id = compose_raft_peer_id(short_host, raft_port)
 
-                        req_lite = PullLogEntryRequestLite(
-                            group_id=group_id,
-                            server_id=server_id,
-                            peer_id=peer_id,
-                            term=term,
-                            prev_log_term=prev_log_term,
-                            prev_log_index=prev_log_index,
-                        )
-                        logger.info(
-                            "inbound_interest source=name name=%s group_id=%s server_id=%s peer_id=%s term=%d prev_log_term=%d prev_log_index=%d",
-                            name_str, group_id, server_id, peer_id, term, prev_log_term, prev_log_index,
-                        )
+                    logger.info(
+                        "inbound_interest name=%s group_id=%s server_id=%s peer_id=%s term=%d prev_log_term=%d prev_log_index=%d",
+                        name_str, group_id, server_id, peer_id, term, prev_log_term, prev_log_index,
+                    )
+
+                    req_lite = PullLogEntryRequestLite(
+                        group_id=group_id,
+                        server_id=server_id,
+                        peer_id=peer_id,
+                        term=term,
+                        prev_log_term=prev_log_term,
+                        prev_log_index=prev_log_index,
+                    )
 
                     req_bytes = encode_pull_log_entry_request(req_lite)
                     t0 = time.monotonic()
