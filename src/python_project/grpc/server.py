@@ -133,7 +133,10 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 method,
                 len(request_bytes),
             )
-            if is_jraft_pull:
+            # Only convert PullLog to NDN when use_ndn is enabled; otherwise fall
+            # through and forward it upstream like any other RPC
+            # (use_ndn=false => transparent passthrough).
+            if is_jraft_pull and self.config.get_grpc_server_use_ndn():
                 logger.debug(
                     "transparent_passthrough jraft_branch: kind=pull_log_ndn method=%s",
                     method,
@@ -151,7 +154,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                     context.set_details("NDN queue not initialized")
                     return b""
 
-                # Build NDN interest
+                # Build NDN interest (name-only encoding)
                 interest_name = pull_log_entry_request_to_interest_name(req)
                 app_param = pull_log_entry_request_to_data_content(req)
 
@@ -460,17 +463,13 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         )
         
         use_ndn = self.config.get_grpc_server_use_ndn()
-        
+
         if not use_ndn:
-            logger.warning("NDN is disabled, but request reached here. This should not happen in sidecar mode.")
-            response = bidirectional_pb2.PullLogEntryResponse()
-            response.success = False
-            response.errorResponse.errorCode = 100
-            response.errorResponse.errorMsg = "NDN processing is disabled"
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            context.set_details("NDN processing is disabled")
-            return response
-        
+            # NDN disabled: forward PullLogEntries upstream like any other RPC
+            # (transparent passthrough).
+            logger.info("NDN disabled: forwarding PullLogEntries to upstream like other RPCs")
+            return await asyncio.to_thread(self._forward_rpc, 'PullLogEntries', request, context)
+
         if _ndn_client is None or _ndn_queue is None:
             logger.error("NDN client or queue not initialized")
             response = bidirectional_pb2.PullLogEntryResponse()
@@ -480,7 +479,8 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("NDN client or queue not initialized")
             return response
-        
+
+        # NDN name-only encoding.
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
         logger.info("outbound_interest name=%s", interest_name)
@@ -559,12 +559,14 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
         port = config.get_grpc_server_port()
     
     use_ndn = config.get_grpc_server_use_ndn()
-    
+
+    # NDN is only used when use_ndn is enabled; when disabled the sidecar is a
+    # transparent passthrough and does not need the interest queue.
     if use_ndn:
         if _ndn_queue is None:
             _ndn_queue = Queue()
             logger.info("NDN interest queue created")
-    
+
     servicer = SimpleService(config_path=config_path)
     server = grpc.aio.server()
     bidirectional_pb2_grpc.add_SimpleServiceServicer_to_server(servicer, server)
@@ -583,7 +585,7 @@ def create_server(port: Optional[int] = None, config_path: Optional[str] = None)
     if use_ndn:
         logger.info("NDN enabled: PullLogEntryRequest will be converted to NDN Interest, other requests will be forwarded directly")
     else:
-        logger.info("gRPC server running in default mode (NDN disabled)")
+        logger.info("gRPC server running in passthrough mode (NDN disabled): PullLogEntries forwarded upstream like other RPCs")
     return server
 
 
@@ -594,7 +596,7 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
     
     config = get_config(config_path)
     use_ndn = config.get_grpc_server_use_ndn()
-    
+
     if use_ndn:
         if _ndn_queue is None:
             logger.error("NDN queue not initialized")
@@ -662,8 +664,8 @@ async def run_server_async(port: Optional[int] = None, config_path: Optional[str
             logger.warning("NDN client connection timeout, continuing anyway...")
             _ndn_connected.set()
     else:
-        logger.info("NDN client disabled, skipping NDN initialization")
-    
+        logger.info("NDN disabled: passthrough mode, skipping NDN client initialization")
+
     await server.start()
     logger.info("gRPC server started, waiting for connections...")
     
