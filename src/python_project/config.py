@@ -134,10 +134,36 @@ class Config:
     def get_server_config(self) -> Dict[str, Any]:
         """Get server-specific configuration."""
         return self._config.get('server', {})
+
+    def get_server_freshness_period(self) -> int:
+        """Get Data freshness period (ms) from server config."""
+        value = self.get('server.freshness_period')
+        if value is None:
+            return 10000
+        try:
+            # SERVER_FRESHNESS_PERIOD arrives as a string; put_data needs an int.
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid server.freshness_period: {value!r}, falling back to 10000")
+            return 10000
     
     def get_client_config(self) -> Dict[str, Any]:
         """Get client-specific configuration."""
         return self._config.get('client', {})
+
+    def get_client_interest_lifetime(self) -> int:
+        """Get Interest lifetime (ms) from client config."""
+        value = self.get('client.interest_lifetime')
+        if value is None:
+            return 4000
+        try:
+            # CLIENT_INTEREST_LIFETIME arrives as a string; InterestParam needs an int.
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid client.interest_lifetime: {value!r}, falling back to 4000")
+            return 4000
     
     def get_client_disable_cache(self) -> bool:
         """Get disable_cache setting from client config."""

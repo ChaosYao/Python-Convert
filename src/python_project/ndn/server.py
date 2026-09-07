@@ -383,7 +383,7 @@ class NDNServer:
                         'errorMsg': 'gRPC bridge not configured'
                     }
                 }).encode()
-                freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+                freshness_period = self.config.get_server_freshness_period()
                 self.app.put_data(name, content=content, freshness_period=freshness_period)
 
             try:
@@ -417,7 +417,7 @@ class NDNServer:
                 return
 
             logger.debug(f"Processing Interest with gRPC bridge: {name_str}")
-            freshness_period = self.config.get_server_config().get('freshness_period', 10000)
+            freshness_period = self.config.get_server_freshness_period()
 
             # Warn when all workers are busy — indicates JRaft backpressure.
             queued = self._bridge_executor._work_queue.qsize()

@@ -158,8 +158,7 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 interest_name = pull_log_entry_request_to_interest_name(req)
                 app_param = pull_log_entry_request_to_data_content(req)
 
-                client_config = self.config.get_client_config()
-                interest_lifetime = client_config.get('interest_lifetime', 4000)
+                interest_lifetime = self.config.get_client_interest_lifetime()
                 disable_cache = self.config.get_client_disable_cache()
                 logger.info(
                     "outbound_interest name=%s lifetime=%sms must_be_fresh=%s cache=%s",
@@ -492,8 +491,7 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         request_content = pull_log_entry_request_to_data_content(request)
         
         try:
-            client_config = self.config.get_client_config()
-            interest_lifetime = client_config.get('interest_lifetime', 4000)
+            interest_lifetime = self.config.get_client_interest_lifetime()
             disable_cache = self.config.get_client_disable_cache()
             logger.info(
                 "outbound_interest name=%s lifetime=%sms must_be_fresh=%s cache=%s",
