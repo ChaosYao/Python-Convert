@@ -161,6 +161,13 @@ class TransparentForwardingHandler(grpc.GenericRpcHandler):
                 client_config = self.config.get_client_config()
                 interest_lifetime = client_config.get('interest_lifetime', 4000)
                 disable_cache = self.config.get_client_disable_cache()
+                logger.info(
+                    "outbound_interest name=%s lifetime=%sms must_be_fresh=%s cache=%s",
+                    interest_name,
+                    interest_lifetime,
+                    disable_cache,
+                    "bypassed" if disable_cache else "enabled",
+                )
 
                 if _ndn_connected is not None and not _ndn_connected.is_set():
                     await _ndn_connected.wait()
@@ -483,12 +490,18 @@ class SimpleService(bidirectional_pb2_grpc.SimpleServiceServicer):
         # NDN name-only encoding.
         interest_name = pull_log_entry_request_to_interest_name(request)
         request_content = pull_log_entry_request_to_data_content(request)
-        logger.info("outbound_interest name=%s", interest_name)
         
         try:
             client_config = self.config.get_client_config()
             interest_lifetime = client_config.get('interest_lifetime', 4000)
             disable_cache = self.config.get_client_disable_cache()
+            logger.info(
+                "outbound_interest name=%s lifetime=%sms must_be_fresh=%s cache=%s",
+                interest_name,
+                interest_lifetime,
+                disable_cache,
+                "bypassed" if disable_cache else "enabled",
+            )
             
             if _ndn_connected is not None and not _ndn_connected.is_set():
                 logger.warning("NDN client not connected yet, waiting...")

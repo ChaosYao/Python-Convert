@@ -34,7 +34,9 @@ client:
   
   # Disable cache (must_be_fresh flag)
   # If true, Interest will require fresh data and bypass cache
-  disable_cache: true
+  # false => must_be_fresh is not set, so NFD/ndn CS can satisfy the Interest
+  #          from cached Data (NDN caching enabled)
+  disable_cache: false
   
   # Interest name to use when converting gRPC requests to NDN Interests
   # This is used by gRPC Server when forwarding requests to NDN
