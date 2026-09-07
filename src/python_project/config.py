@@ -141,7 +141,16 @@ class Config:
     
     def get_client_disable_cache(self) -> bool:
         """Get disable_cache setting from client config."""
-        return self.get('client.disable_cache', False)
+        value = self.get('client.disable_cache')
+        if value is None:
+            return False  # Default to False (caching enabled)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            # CLIENT_DISABLE_CACHE arrives as a string; "false" is truthy in
+            # Python, so it must be parsed rather than passed through.
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
     
     def get_grpc_config(self) -> Dict[str, Any]:
         return self._config.get('grpc', {})
